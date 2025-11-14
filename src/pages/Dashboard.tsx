@@ -1,0 +1,275 @@
+import { useEffect, useState, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { useAuth } from '@/contexts/AuthContext';
+import { supabase } from '@/integrations/supabase/client';
+import { realtimeSync } from '@/lib/syncService';
+import { ArrowLeft } from 'lucide-react';
+import dashboardIcon from '@/assets/icons/dashboard.png';
+import ticketIcon from '@/assets/icons/ticket.png';
+import analyticsIcon from '@/assets/icons/analytics.png';
+import scannerIcon from '@/assets/icons/scanner.png';
+import moneyIcon from '@/assets/icons/money.png';
+import userIcon from '@/assets/icons/user.png';
+import logoutIcon from '@/assets/icons/logout.png';
+import uploadIcon from '@/assets/icons/upload.png';
+import cashierIcon from '@/assets/icons/cashier.png';
+
+const Dashboard = () => {
+  const navigate = useNavigate();
+  const { user, profile, signOut, isLoading } = useAuth();
+  const [stats, setStats] = useState({
+    totalTickets: 0,
+    soldTickets: 0,
+    usedTickets: 0,
+    availableTickets: 0,
+    bulkSold: 0,
+    cashierSold: 0,
+    totalSales: 0,
+    totalUsers: 0,
+  });
+  const [isLoadingStats, setIsLoadingStats] = useState(true);
+
+  // Optimized stats loading with parallel queries and caching
+  const loadStats = useCallback(async () => {
+    try {
+      setIsLoadingStats(true);
+
+      // Parallel queries for better performance
+      const [ticketsResult, salesResult, usersResult] = await Promise.all([
+        supabase.from('tickets').select('status, sale_type', { count: 'exact' }),
+        supabase.from('sales').select('amount', { count: 'exact' }),
+        supabase.from('profiles').select('id', { count: 'exact', head: true }),
+      ]);
+
+      const tickets = ticketsResult.data || [];
+      const sales = salesResult.data || [];
+      const totalUsers = usersResult.count || 0;
+
+      // Calculate stats
+      const soldCount = tickets.filter(t => t.status === 'sold').length;
+      const usedCount = tickets.filter(t => t.status === 'used').length;
+      const availableCount = tickets.filter(t => t.status === 'available').length;
+      const bulkSoldCount = tickets.filter(t => t.status === 'sold' && t.sale_type === 'bulk').length;
+      const cashierSoldCount = tickets.filter(t => t.status === 'sold' && t.sale_type === 'cashier').length;
+      const totalSalesAmount = sales.reduce((sum, sale) => sum + Number(sale.amount || 0), 0);
+
+      setStats({
+        totalTickets: tickets.length,
+        soldTickets: soldCount,
+        usedTickets: usedCount,
+        availableTickets: availableCount,
+        bulkSold: bulkSoldCount,
+        cashierSold: cashierSoldCount,
+        totalSales: totalSalesAmount,
+        totalUsers,
+      });
+    } catch (error) {
+      console.error('Error loading stats:', error);
+    } finally {
+      setIsLoadingStats(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    // Initial load
+    loadStats();
+
+    // Subscribe to real-time updates
+    const unsubscribeTickets = realtimeSync.subscribe('tickets_updated', loadStats);
+    const unsubscribeSales = realtimeSync.subscribe('sales_updated', loadStats);
+    const unsubscribeProfiles = realtimeSync.subscribe('profiles_updated', loadStats);
+
+    return () => {
+      unsubscribeTickets();
+      unsubscribeSales();
+      unsubscribeProfiles();
+    };
+  }, [user, loadStats]);
+
+  const handleLogout = () => {
+    signOut();
+    navigate('/login');
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  if (!user) return null;
+
+  return (
+    <div className="min-h-screen bg-background">
+      <nav className="bg-card/80 backdrop-blur-sm border-b border-border shadow-sm sticky top-0 z-40">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between items-center h-16">
+            <div className="flex items-center gap-2">
+              <div className="w-10 h-10 bg-primary/10 rounded-xl flex items-center justify-center">
+                <img src={dashboardIcon} alt="Dashboard" className="w-6 h-6" />
+              </div>
+              <div>
+                <span className="text-xl font-bold text-foreground">Dashboard</span>
+                <p className="text-xs text-muted-foreground hidden sm:block">Real-time analytics</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-4">
+              {isLoadingStats && (
+                <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+              )}
+              <span className="text-sm text-muted-foreground hidden sm:inline">
+                {profile?.name || user.email?.split('@')[0] || 'User'}
+              </span>
+              <Button variant="outline" size="sm" onClick={() => navigate('/')}>
+                <ArrowLeft className="w-4 h-4 mr-2" />
+                Home
+              </Button>
+              <Button variant="ghost" size="sm" onClick={handleLogout} className="hidden sm:flex">
+                <img src={logoutIcon} alt="Logout" className="w-4 h-4 mr-2" />
+                Logout
+              </Button>
+            </div>
+          </div>
+        </div>
+      </nav>
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+          <Card className="hover-lift border-l-4 border-l-accent animate-slide-up">
+            <CardContent className="flex items-center p-6">
+              <div className="w-14 h-14 bg-accent/10 rounded-xl flex items-center justify-center mr-4 shadow-sm">
+                <img src={ticketIcon} alt="Tickets" className="w-7 h-7" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-muted-foreground mb-1">Total Tickets</p>
+                <p className="text-3xl font-bold text-foreground">{stats.totalTickets.toLocaleString()}</p>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="hover-lift border-l-4 border-l-success animate-slide-up" style={{ animationDelay: '50ms' }}>
+            <CardContent className="flex items-center p-6">
+              <div className="w-14 h-14 bg-success/10 rounded-xl flex items-center justify-center mr-4 shadow-sm">
+                <img src={analyticsIcon} alt="Analytics" className="w-7 h-7" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-muted-foreground mb-1">Sold Tickets</p>
+                <p className="text-3xl font-bold text-foreground">{stats.soldTickets.toLocaleString()}</p>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="hover-lift border-l-4 border-l-warning animate-slide-up" style={{ animationDelay: '100ms' }}>
+            <CardContent className="flex items-center p-6">
+              <div className="w-14 h-14 bg-warning/10 rounded-xl flex items-center justify-center mr-4 shadow-sm">
+                <img src={scannerIcon} alt="Scanner" className="w-7 h-7" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-muted-foreground mb-1">Used Tickets</p>
+                <p className="text-3xl font-bold text-foreground">{stats.usedTickets.toLocaleString()}</p>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="hover-lift border-l-4 border-l-muted animate-slide-up" style={{ animationDelay: '150ms' }}>
+            <CardContent className="flex items-center p-6">
+              <div className="w-14 h-14 bg-muted rounded-xl flex items-center justify-center mr-4 shadow-sm">
+                <img src={ticketIcon} alt="Tickets" className="w-7 h-7" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-muted-foreground mb-1">Available</p>
+                <p className="text-3xl font-bold text-foreground">{stats.availableTickets.toLocaleString()}</p>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="hover-lift border-l-4 border-l-success animate-slide-up" style={{ animationDelay: '200ms' }}>
+            <CardContent className="flex items-center p-6">
+              <div className="w-14 h-14 bg-success/10 rounded-xl flex items-center justify-center mr-4 shadow-sm">
+                <img src={moneyIcon} alt="Money" className="w-7 h-7" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-muted-foreground mb-1">Total Sales</p>
+                <p className="text-3xl font-bold text-foreground">${stats.totalSales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="hover-lift border-l-4 border-l-primary animate-slide-up" style={{ animationDelay: '250ms' }}>
+            <CardContent className="flex items-center p-6">
+              <div className="w-14 h-14 bg-primary/10 rounded-xl flex items-center justify-center mr-4 shadow-sm">
+                <img src={userIcon} alt="Users" className="w-7 h-7" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-muted-foreground mb-1">Total Users</p>
+                <p className="text-3xl font-bold text-foreground">{stats.totalUsers}</p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        <Card className="animate-fade-in">
+          <CardContent className="p-6">
+            <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+              Quick Actions
+              <span className="text-xs px-2 py-1 bg-primary/10 text-primary rounded-full">Shortcuts</span>
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <Button
+                className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
+                variant="outline"
+                onClick={() => navigate('/cashier')}
+              >
+                <div className="w-12 h-12 bg-success/10 rounded-xl flex items-center justify-center">
+                  <img src={cashierIcon} alt="Cashier" className="w-7 h-7" />
+                </div>
+                <span className="font-semibold">Sell Tickets</span>
+              </Button>
+
+              <Button
+                className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
+                variant="outline"
+                onClick={() => navigate('/scanner')}
+              >
+                <div className="w-12 h-12 bg-warning/10 rounded-xl flex items-center justify-center">
+                  <img src={scannerIcon} alt="Scanner" className="w-7 h-7" />
+                </div>
+                <span className="font-semibold">Scan Tickets</span>
+              </Button>
+
+              <Button
+                className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
+                variant="outline"
+                onClick={() => navigate('/upload')}
+              >
+                <div className="w-12 h-12 bg-accent/10 rounded-xl flex items-center justify-center">
+                  <img src={uploadIcon} alt="Upload" className="w-7 h-7" />
+                </div>
+                <span className="font-semibold">Upload Tickets</span>
+              </Button>
+
+              <Button
+                variant="outline"
+                className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
+                onClick={() => navigate('/account')}
+              >
+                <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center">
+                  <img src={userIcon} alt="Users" className="w-7 h-7" />
+                </div>
+                <span className="font-semibold">My Account</span>
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+};
+
+export default Dashboard;
