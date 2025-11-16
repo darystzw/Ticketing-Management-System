@@ -7,10 +7,13 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Checkbox } from '@/components/ui/checkbox';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
-import { FileText, ArrowLeft, Plus, AlertTriangle, CheckCircle, XCircle, Info } from 'lucide-react';
+import { getCache, setCache, removeCache } from '@/lib/cache';
+import useLocalStorage from '@/hooks/use-local-storage';
+import { FileText, ArrowLeft, Plus, AlertTriangle, CheckCircle, Info, Package, Ticket } from 'lucide-react';
 import uploadIcon from '@/assets/icons/upload.png';
 
 interface TicketRow {
@@ -28,27 +31,47 @@ const Upload = () => {
   const [uploadResults, setUploadResults] = useState<{ 
     success: number; 
     failed: number; 
-    cashier: number;
-    bulk: number;
+    bulkSold: number;
+    availableCreated: number;
     errors: string[] 
   } | null>(null);
   const [events, setEvents] = useState<any[]>([]);
-  const [selectedEventId, setSelectedEventId] = useState<string>('');
+  const [selectedEventId, setSelectedEventId] = useLocalStorage<string>('upload:selectedEventId', '');
   const [showCreateEvent, setShowCreateEvent] = useState(false);
   const [newEventName, setNewEventName] = useState('');
   const [newEventDate, setNewEventDate] = useState('');
-  const [rangeStart, setRangeStart] = useState('');
-  const [rangeEnd, setRangeEnd] = useState('');
+  const [bulkRangeStart, setBulkRangeStart] = useState('');
+  const [bulkRangeEnd, setBulkRangeEnd] = useState('');
   const [progress, setProgress] = useState(0);
-  const [bulkBuyerName, setBulkBuyerName] = useState('');
-  const [bulkBuyerEmail, setBulkBuyerEmail] = useState('');
-  const [bulkBuyerPhone, setBulkBuyerPhone] = useState('');
+  const [bulkBuyerName, setBulkBuyerName] = useLocalStorage<string>('upload:bulkBuyerName', '');
+  const [bulkBuyerEmail, setBulkBuyerEmail] = useLocalStorage<string>('upload:bulkBuyerEmail', '');
+  const [bulkBuyerPhone, setBulkBuyerPhone] = useLocalStorage<string>('upload:bulkBuyerPhone', '');
+  
+  // Upload options
+  const [uploadBulkTickets, setUploadBulkTickets] = useState(true);
+  const [createAvailableTickets, setCreateAvailableTickets] = useState(true);
+  
+  // Preview calculated ranges
+  const [previewRanges, setPreviewRanges] = useState<{
+    totalTickets: number;
+    bulkStart: number;
+    bulkEnd: number;
+    bulkCount: number;
+    availableTickets: number[];
+    availableCount: number;
+  } | null>(null);
 
   useEffect(() => {
     loadEvents();
   }, []);
 
   const loadEvents = async () => {
+    const cached = getCache<any[]>('events_all');
+    if (cached && cached.length > 0) {
+      setEvents(cached);
+      if (!selectedEventId) setSelectedEventId(cached[0].id);
+    }
+
     const { data, error } = await supabase
       .from('events')
       .select('*')
@@ -56,24 +79,25 @@ const Upload = () => {
 
     if (error) {
       console.error('Error loading events:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to load events',
-        variant: 'destructive',
-      });
+      if (!cached) {
+        toast({
+          title: 'Error',
+          description: 'Failed to load events',
+          variant: 'destructive',
+        });
+      }
       return;
     }
 
     if (data && data.length > 0) {
       setEvents(data);
-      if (!selectedEventId) {
-        setSelectedEventId(data[0].id);
-      }
+      await setCache('events_all', data, 1000 * 60 * 5);
+      if (!selectedEventId) setSelectedEventId(data[0].id);
     }
   };
 
   const handleCreateEvent = async () => {
-    if (!newEventName.trim() || !newEventDate || !rangeStart || !rangeEnd) {
+    if (!newEventName.trim() || !newEventDate || !bulkRangeStart || !bulkRangeEnd) {
       toast({
         title: 'Error',
         description: 'Please fill in all fields',
@@ -82,26 +106,29 @@ const Upload = () => {
       return;
     }
 
-    const start = parseInt(rangeStart);
-    const end = parseInt(rangeEnd);
+    const bulkStart = parseInt(bulkRangeStart);
+    const bulkEnd = parseInt(bulkRangeEnd);
 
-    if (isNaN(start) || isNaN(end) || start > end || start < 1) {
+    if (isNaN(bulkStart) || isNaN(bulkEnd) || bulkStart > bulkEnd || bulkStart < 1) {
       toast({
         title: 'Invalid Range',
-        description: 'Please enter a valid ticket number range (start must be >= 1, end must be >= start)',
+        description: 'Please enter a valid bulk range (start must be >= 1, end must be >= start)',
         variant: 'destructive',
       });
       return;
     }
 
     try {
+      // Event range will be set to 0-0 initially, will be updated when CSV is uploaded
       const { data: newEvent, error } = await supabase
         .from('events')
         .insert({
           name: newEventName.trim(),
           event_date: newEventDate,
-          range_start: start,
-          range_end: end,
+          range_start: 0,
+          range_end: 0,
+          bulk_sold_range_start: bulkStart,
+          bulk_sold_range_end: bulkEnd,
           created_by: user?.id
         })
         .select()
@@ -111,13 +138,13 @@ const Upload = () => {
 
       toast({
         title: 'Event Created',
-        description: `Event "${newEventName}" created successfully`,
+        description: `Event "${newEventName}" created with bulk range ${bulkStart}-${bulkEnd}`,
       });
 
       setNewEventName('');
       setNewEventDate('');
-      setRangeStart('');
-      setRangeEnd('');
+      setBulkRangeStart('');
+      setBulkRangeEnd('');
       setShowCreateEvent(false);
 
       await loadEvents();
@@ -133,11 +160,16 @@ const Upload = () => {
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
+      const selectedFile = e.target.files[0];
+      setFile(selectedFile);
       setUploadResults(null);
       setProgress(0);
+      
+      if (selectedEventId) {
+        await calculatePreviewRanges(selectedFile);
+      }
     }
   };
 
@@ -167,31 +199,64 @@ const Upload = () => {
     return tickets;
   };
 
-  const getAvailableRange = (event: any) => {
-    if (!event.bulk_sold_range_start || !event.bulk_sold_range_end) {
-      return { start: event.range_start, end: event.range_end };
+  const calculatePreviewRanges = async (csvFile: File) => {
+    try {
+      const selectedEvent = events.find(e => e.id === selectedEventId);
+      if (!selectedEvent) return;
+
+      if (!selectedEvent.bulk_sold_range_start || !selectedEvent.bulk_sold_range_end) {
+        toast({
+          title: 'Error',
+          description: 'Event must have bulk range specified',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const text = await csvFile.text();
+      const tickets = parseCSV(text);
+
+      if (tickets.length === 0) {
+        setPreviewRanges(null);
+        return;
+      }
+
+      const bulkStart = selectedEvent.bulk_sold_range_start;
+      const bulkEnd = selectedEvent.bulk_sold_range_end;
+      const totalTickets = tickets.length;
+
+      // Get all ticket numbers from CSV
+      const allTicketNumbers = tickets.map(t => t.ticketNumber);
+      
+      // Find tickets that are in bulk range
+      const bulkTickets = allTicketNumbers.filter(num => num >= bulkStart && num <= bulkEnd);
+      const bulkCount = bulkTickets.length;
+      
+      // Find tickets that are NOT in bulk range (these are available)
+      const availableTickets = allTicketNumbers.filter(num => num < bulkStart || num > bulkEnd);
+      const availableCount = availableTickets.length;
+
+      setPreviewRanges({
+        totalTickets,
+        bulkStart,
+        bulkEnd,
+        bulkCount,
+        availableTickets,
+        availableCount
+      });
+    } catch (error) {
+      console.error('Error calculating preview:', error);
+      setPreviewRanges(null);
     }
-
-    const bulkStart = event.bulk_sold_range_start;
-    const bulkEnd = event.bulk_sold_range_end;
-    const eventStart = event.range_start;
-    const eventEnd = event.range_end;
-
-    if (bulkStart <= eventStart && bulkEnd >= eventEnd) {
-      return null;
-    }
-
-    const beforeBulk = bulkStart > eventStart ? { start: eventStart, end: bulkStart - 1 } : null;
-    const afterBulk = bulkEnd < eventEnd ? { start: bulkEnd + 1, end: eventEnd } : null;
-
-    if (beforeBulk && afterBulk) {
-      const beforeSize = beforeBulk.end - beforeBulk.start + 1;
-      const afterSize = afterBulk.end - afterBulk.start + 1;
-      return afterSize >= beforeSize ? afterBulk : beforeBulk;
-    }
-
-    return beforeBulk || afterBulk || null;
   };
+
+  useEffect(() => {
+    if (file && selectedEventId) {
+      calculatePreviewRanges(file);
+    } else {
+      setPreviewRanges(null);
+    }
+  }, [selectedEventId, file]);
 
   const handleUpload = async () => {
     if (!file || !selectedEventId) {
@@ -203,10 +268,19 @@ const Upload = () => {
       return;
     }
 
-    if (!bulkBuyerName.trim()) {
+    if (uploadBulkTickets && !bulkBuyerName.trim()) {
       toast({
         title: 'Error',
         description: 'Please enter buyer name for bulk sale',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (!uploadBulkTickets && !createAvailableTickets) {
+      toast({
+        title: 'Error',
+        description: 'Please select at least one upload option',
         variant: 'destructive',
       });
       return;
@@ -217,6 +291,15 @@ const Upload = () => {
       toast({
         title: 'Error',
         description: 'Selected event not found',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (!selectedEvent.bulk_sold_range_start || !selectedEvent.bulk_sold_range_end) {
+      toast({
+        title: 'Error',
+        description: 'Event must have bulk range specified',
         variant: 'destructive',
       });
       return;
@@ -235,110 +318,37 @@ const Upload = () => {
 
       let successCount = 0;
       let failedCount = 0;
-      let cashierCount = 0;
-      let bulkCount = 0;
+      let bulkSoldCount = 0;
+      let availableCreatedCount = 0;
       const errors: string[] = [];
 
-      // Separate tickets into bulk range and outside range (cashier)
+      const bulkStart = selectedEvent.bulk_sold_range_start;
+      const bulkEnd = selectedEvent.bulk_sold_range_end;
+      
+      // Get min and max from CSV to set event range
       const ticketNumbers = tickets.map(t => t.ticketNumber).sort((a, b) => a - b);
-      const minTicket = ticketNumbers[0];
-      const maxTicket = ticketNumbers[ticketNumbers.length - 1];
+      const csvMin = ticketNumbers[0];
+      const csvMax = ticketNumbers[ticketNumbers.length - 1];
 
-      // Determine which tickets are in continuous bulk range
-      const bulkTickets: TicketRow[] = [];
-      const cashierTickets: TicketRow[] = [];
+      // Update event range to match CSV
+      const { error: updateError } = await supabase
+        .from('events')
+        .update({
+          range_start: csvMin,
+          range_end: csvMax
+        })
+        .eq('id', selectedEventId);
 
-      // Find the continuous bulk range
-      const bulkRangeStart = minTicket;
-      let bulkRangeEnd = minTicket;
-
-      for (let i = 0; i < ticketNumbers.length - 1; i++) {
-        if (ticketNumbers[i + 1] === ticketNumbers[i] + 1) {
-          bulkRangeEnd = ticketNumbers[i + 1];
-        } else {
-          break; // Found a gap, stop bulk range here
-        }
+      if (updateError) {
+        throw new Error(`Failed to update event range: ${updateError.message}`);
       }
 
-      // Categorize tickets
-      for (const ticket of tickets) {
-        if (ticket.ticketNumber >= bulkRangeStart && ticket.ticketNumber <= bulkRangeEnd) {
-          // Ticket is in continuous bulk range
-          if (ticket.ticketNumber >= selectedEvent.range_start && 
-              ticket.ticketNumber <= selectedEvent.range_end) {
-            bulkTickets.push(ticket);
-          } else {
-            cashierTickets.push(ticket);
-          }
-        } else {
-          // Ticket is outside continuous range - assign to cashier
-          cashierTickets.push(ticket);
-        }
-      }
+      // Separate tickets into bulk and available
+      const bulkTickets = tickets.filter(t => t.ticketNumber >= bulkStart && t.ticketNumber <= bulkEnd);
+      const availableTicketsData = tickets.filter(t => t.ticketNumber < bulkStart || t.ticketNumber > bulkEnd);
 
-      // Process BULK tickets
-      if (bulkTickets.length > 0) {
-        const bulkMin = Math.min(...bulkTickets.map(t => t.ticketNumber));
-        const bulkMax = Math.max(...bulkTickets.map(t => t.ticketNumber));
-
-        // Validate bulk tickets are in event range
-        if (bulkMin < selectedEvent.range_start || bulkMax > selectedEvent.range_end) {
-          throw new Error(`Bulk range ${bulkMin}-${bulkMax} is outside event range ${selectedEvent.range_start}-${selectedEvent.range_end}`);
-        }
-
-        // Check for gaps in bulk range
-        const expectedBulkCount = bulkMax - bulkMin + 1;
-        if (bulkTickets.length !== expectedBulkCount) {
-          throw new Error(`Bulk range ${bulkMin}-${bulkMax} has gaps. All bulk tickets must be continuous.`);
-        }
-
-        // Check overlap with existing bulk range
-        if (selectedEvent.bulk_sold_range_start && selectedEvent.bulk_sold_range_end) {
-          const existingStart = selectedEvent.bulk_sold_range_start;
-          const existingEnd = selectedEvent.bulk_sold_range_end;
-          const canMerge = (bulkMin <= existingEnd + 1 && bulkMax >= existingStart - 1);
-
-          if (!canMerge) {
-            const gap = Math.min(
-              Math.abs(bulkMin - existingEnd - 1),
-              Math.abs(existingStart - bulkMax - 1)
-            );
-            throw new Error(`Bulk range ${bulkMin}-${bulkMax} has a gap of ${gap} with existing bulk range ${existingStart}-${existingEnd}`);
-          }
-        }
-
-        // Check for existing non-bulk tickets
-        const { data: existingNonBulk, error: checkError } = await supabase
-          .from('tickets')
-          .select('ticket_number, sale_type')
-          .eq('event_id', selectedEventId)
-          .gte('ticket_number', bulkMin)
-          .lte('ticket_number', bulkMax)
-          .neq('sale_type', 'bulk');
-
-        if (checkError) {
-          throw new Error(`Failed to check existing tickets: ${checkError.message}`);
-        }
-
-        if (existingNonBulk && existingNonBulk.length > 0) {
-          throw new Error(`${existingNonBulk.length} cashier tickets already exist in bulk range ${bulkMin}-${bulkMax}`);
-        }
-
-        // Update event bulk range
-        const { error: rpcError } = await supabase.rpc('update_event_bulk_range', {
-          _event_id: selectedEventId,
-          _bulk_range_start: bulkMin,
-          _bulk_range_end: bulkMax,
-          _buyer_name: bulkBuyerName.trim(),
-          _buyer_email: bulkBuyerEmail.trim() || null,
-          _buyer_phone: bulkBuyerPhone.trim() || null
-        });
-
-        if (rpcError) {
-          throw new Error(`Failed to update bulk range: ${rpcError.message}`);
-        }
-
-        // Insert bulk tickets
+      // STEP 1: Upload BULK tickets (if selected)
+      if (uploadBulkTickets && bulkTickets.length > 0) {
         const batchSize = 100;
         const currentTime = new Date().toISOString();
 
@@ -386,7 +396,7 @@ const Upload = () => {
                   onConflict: 'ticket_number,event_id'
                 });
                 successCount++;
-                bulkCount++;
+                bulkSoldCount++;
               } catch (err: any) {
                 failedCount++;
                 errors.push(`${ticket.ticketCode}: ${err.message}`);
@@ -395,19 +405,19 @@ const Upload = () => {
           } else {
             const inserted = data?.length || batch.length;
             successCount += inserted;
-            bulkCount += inserted;
+            bulkSoldCount += inserted;
           }
 
           setProgress(Math.min(((i + batchSize) / tickets.length) * 50, 50));
         }
       }
 
-      // Process CASHIER tickets (available for individual sale)
-      if (cashierTickets.length > 0) {
+      // STEP 2: Create AVAILABLE tickets (if selected)
+      if (createAvailableTickets && availableTicketsData.length > 0) {
         const batchSize = 100;
 
-        for (let i = 0; i < cashierTickets.length; i += batchSize) {
-          const batch = cashierTickets.slice(i, i + batchSize);
+        for (let i = 0; i < availableTicketsData.length; i += batchSize) {
+          const batch = availableTicketsData.slice(i, i + batchSize);
 
           const ticketData = batch.map(ticket => ({
             ticket_number: ticket.ticketNumber,
@@ -435,7 +445,7 @@ const Upload = () => {
                   sale_type: 'cashier' as const
                 });
                 successCount++;
-                cashierCount++;
+                availableCreatedCount++;
               } catch (err: any) {
                 failedCount++;
                 errors.push(`${ticket.ticketCode}: ${err.message}`);
@@ -444,32 +454,47 @@ const Upload = () => {
           } else {
             const inserted = data?.length || batch.length;
             successCount += inserted;
-            cashierCount += inserted;
+            availableCreatedCount += inserted;
           }
 
-          setProgress(Math.min(50 + ((i + batchSize) / cashierTickets.length) * 50, 100));
+          setProgress(Math.min(50 + ((i + batchSize) / availableTicketsData.length) * 50, 100));
         }
+      }
+
+      // Invalidate cache
+      try {
+        removeCache('events_all');
+        removeCache('dashboard:stats');
+      } catch (err) {
+        console.debug('cache invalidate failed', err);
       }
 
       setUploadResults({ 
         success: successCount, 
         failed: failedCount, 
-        cashier: cashierCount,
-        bulk: bulkCount,
+        bulkSold: bulkSoldCount,
+        availableCreated: availableCreatedCount,
         errors 
       });
       setProgress(100);
 
+      const resultParts = [];
+      if (bulkSoldCount > 0) resultParts.push(`${bulkSoldCount} bulk sold`);
+      if (availableCreatedCount > 0) resultParts.push(`${availableCreatedCount} available created`);
+      if (failedCount > 0) resultParts.push(`${failedCount} failed`);
+
       toast({
         title: 'Upload Complete',
-        description: `${bulkCount} bulk tickets, ${cashierCount} cashier tickets uploaded successfully` + 
-                     (failedCount > 0 ? `, ${failedCount} failed` : ''),
+        description: resultParts.join(', '),
       });
 
       setFile(null);
-      setBulkBuyerName('');
-      setBulkBuyerEmail('');
-      setBulkBuyerPhone('');
+      setPreviewRanges(null);
+      if (uploadBulkTickets) {
+        setBulkBuyerName('');
+        setBulkBuyerEmail('');
+        setBulkBuyerPhone('');
+      }
 
       await loadEvents();
 
@@ -487,30 +512,32 @@ const Upload = () => {
   };
 
   const renderEventStatus = (event: any) => {
-    const availableRange = getAvailableRange(event);
-
-    if (!availableRange) {
-      return (
-        <div className="flex items-center gap-2 text-destructive text-sm">
-          <XCircle className="w-4 h-4" />
-          <span>Fully sold: {event.bulk_sold_range_start}-{event.bulk_sold_range_end} (bulk)</span>
-        </div>
-      );
-    }
-
-    if (event.bulk_sold_range_start && event.bulk_sold_range_end) {
+    if (!event.bulk_sold_range_start || !event.bulk_sold_range_end) {
       return (
         <div className="flex items-center gap-2 text-warning text-sm">
           <AlertTriangle className="w-4 h-4" />
-          <span>Bulk: {event.bulk_sold_range_start}-{event.bulk_sold_range_end} | Available: {availableRange.start}-{availableRange.end}</span>
+          <span>No bulk range specified</span>
         </div>
       );
     }
+
+    if (event.range_start === 0 && event.range_end === 0) {
+      return (
+        <div className="flex items-center gap-2 text-blue-600 text-sm">
+          <Info className="w-4 h-4" />
+          <span>Bulk range: {event.bulk_sold_range_start}-{event.bulk_sold_range_end} | Awaiting CSV upload</span>
+        </div>
+      );
+    }
+
+    const totalTickets = event.range_end - event.range_start + 1;
+    const bulkSize = event.bulk_sold_range_end - event.bulk_sold_range_start + 1;
+    const availableSize = totalTickets - bulkSize;
 
     return (
       <div className="flex items-center gap-2 text-success text-sm">
         <CheckCircle className="w-4 h-4" />
-        <span>All available: {event.range_start}-{event.range_end}</span>
+        <span>Total: {totalTickets} | Bulk: {bulkSize} | Available: {availableSize}</span>
       </div>
     );
   };
@@ -530,7 +557,7 @@ const Upload = () => {
               </div>
               <div>
                 <span className="text-xl font-bold">Upload Tickets</span>
-                <p className="text-xs text-muted-foreground hidden sm:block">Smart bulk sale with auto-cashier assignment</p>
+                <p className="text-xs text-muted-foreground hidden sm:block">Upload bulk & available tickets from CSV</p>
               </div>
             </div>
             <div className="flex items-center gap-4">
@@ -568,28 +595,32 @@ const Upload = () => {
                   onChange={(e) => setNewEventDate(e.target.value)}
                 />
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label htmlFor="rangeStart">Range Start</Label>
-                  <Input
-                    id="rangeStart"
-                    type="number"
-                    min="1"
-                    value={rangeStart}
-                    onChange={(e) => setRangeStart(e.target.value)}
-                    placeholder="1"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="rangeEnd">Range End</Label>
-                  <Input
-                    id="rangeEnd"
-                    type="number"
-                    min="1"
-                    value={rangeEnd}
-                    onChange={(e) => setRangeEnd(e.target.value)}
-                    placeholder="1000"
-                  />
+              <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                <p className="text-sm font-medium text-blue-900 mb-2">Bulk Range</p>
+                <p className="text-xs text-blue-700 mb-3">Specify which ticket numbers are pre-sold in bulk</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="bulkStart">Bulk Start</Label>
+                    <Input
+                      id="bulkStart"
+                      type="number"
+                      min="1"
+                      value={bulkRangeStart}
+                      onChange={(e) => setBulkRangeStart(e.target.value)}
+                      placeholder="1"
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="bulkEnd">Bulk End</Label>
+                    <Input
+                      id="bulkEnd"
+                      type="number"
+                      min="1"
+                      value={bulkRangeEnd}
+                      onChange={(e) => setBulkRangeEnd(e.target.value)}
+                      placeholder="600"
+                    />
+                  </div>
                 </div>
               </div>
               <div className="flex gap-2">
@@ -609,8 +640,10 @@ const Upload = () => {
               <div className="flex items-start gap-3">
                 <Info className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
                 <div className="text-sm text-blue-900">
-                  <p className="font-medium mb-1">Smart Upload System</p>
-                  <p>Continuous tickets are marked as <strong>BULK SOLD</strong>. Tickets outside the event range or with gaps are automatically set as <strong>AVAILABLE for cashier sale</strong>.</p>
+                  <p className="font-medium mb-1">How It Works</p>
+                  <p className="mb-2">1. Create event and specify bulk range (e.g., 1-600)</p>
+                  <p className="mb-2">2. Upload CSV with all tickets</p>
+                  <p>3. System separates: tickets in bulk range → sold | tickets outside bulk range → available</p>
                 </div>
               </div>
             </div>
@@ -619,6 +652,7 @@ const Upload = () => {
               <p className="font-medium mb-2 text-sm">CSV Format:</p>
               <code className="text-xs block">Ticket No.,QR Data</code>
               <code className="text-xs block">A0001,uYBxcW</code>
+              <code className="text-xs block">A0002,kLmNpQ</code>
             </div>
 
             <div>
@@ -649,47 +683,13 @@ const Upload = () => {
               <div className="p-4 bg-muted/30 rounded-lg">
                 <h4 className="font-medium mb-2">Event Status</h4>
                 {renderEventStatus(selectedEvent)}
+                {selectedEvent.bulk_sold_range_start && selectedEvent.bulk_sold_range_end && (
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Bulk Range: {selectedEvent.bulk_sold_range_start}-{selectedEvent.bulk_sold_range_end}
+                  </p>
+                )}
               </div>
             )}
-
-            <Card className="border-2 border-primary/20 bg-primary/5">
-              <CardHeader>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <AlertTriangle className="w-5 h-5 text-primary" />
-                  Bulk Sale Buyer Information
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <Label>Buyer Name *</Label>
-                  <Input
-                    value={bulkBuyerName}
-                    onChange={(e) => setBulkBuyerName(e.target.value)}
-                    placeholder="Company or Individual"
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <Label>Email (optional)</Label>
-                    <Input
-                      type="email"
-                      value={bulkBuyerEmail}
-                      onChange={(e) => setBulkBuyerEmail(e.target.value)}
-                      placeholder="buyer@example.com"
-                    />
-                  </div>
-                  <div>
-                    <Label>Phone (optional)</Label>
-                    <Input
-                      type="tel"
-                      value={bulkBuyerPhone}
-                      onChange={(e) => setBulkBuyerPhone(e.target.value)}
-                      placeholder="+1234567890"
-                    />
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
 
             <div>
               <Label>Select CSV File</Label>
@@ -708,9 +708,132 @@ const Upload = () => {
                   <p className="font-medium">{file.name}</p>
                   <p className="text-xs text-muted-foreground">{(file.size / 1024).toFixed(2)} KB</p>
                 </div>
-                <Button variant="outline" size="sm" onClick={() => setFile(null)}>Remove</Button>
+                <Button variant="outline" size="sm" onClick={() => {
+                  setFile(null);
+                  setPreviewRanges(null);
+                }}>Remove</Button>
               </div>
             )}
+
+            {/* PREVIEW RANGES */}
+            {previewRanges && (
+              <Card className="border-2 border-purple-200 bg-purple-50">
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Info className="w-5 h-5 text-purple-600" />
+                    Upload Preview
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="p-3 bg-white rounded-lg border border-purple-200">
+                    <p className="text-sm font-medium text-purple-900 mb-1">Total Tickets in CSV</p>
+                    <p className="text-2xl font-bold text-purple-600">{previewRanges.totalTickets}</p>
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="p-3 bg-white rounded-lg border border-blue-200">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Package className="w-4 h-4 text-blue-600" />
+                        <p className="text-sm font-medium text-blue-900">Bulk (Pre-Sold)</p>
+                      </div>
+                      <p className="text-2xl font-bold text-blue-600">{previewRanges.bulkCount}</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        In range: {previewRanges.bulkStart}-{previewRanges.bulkEnd}
+                      </p>
+                    </div>
+                    
+                    <div className="p-3 bg-white rounded-lg border border-green-200">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Ticket className="w-4 h-4 text-green-600" />
+                        <p className="text-sm font-medium text-green-900">Available (Cashier)</p>
+                      </div>
+                      <p className="text-2xl font-bold text-green-600">{previewRanges.availableCount}</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Outside bulk range
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* UPLOAD OPTIONS */}
+            <Card className="border-2 border-primary/20 bg-primary/5">
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <AlertTriangle className="w-5 h-5 text-primary" />
+                  Upload Options
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-start space-x-3 p-4 bg-white rounded-lg border">
+                  <Checkbox 
+                    id="uploadBulk" 
+                    checked={uploadBulkTickets}
+                    onCheckedChange={(checked) => setUploadBulkTickets(checked as boolean)}
+                  />
+                  <div className="flex-1">
+                    <label htmlFor="uploadBulk" className="text-sm font-medium cursor-pointer flex items-center gap-2">
+                      <Package className="w-4 h-4 text-blue-600" />
+                      Upload Bulk Tickets
+                    </label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Mark tickets in bulk range as sold to bulk buyer
+                    </p>
+                  </div>
+                </div>
+
+                {uploadBulkTickets && (
+                  <div className="ml-7 space-y-3 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                    <div>
+                      <Label>Bulk Buyer Name *</Label>
+                      <Input
+                        value={bulkBuyerName}
+                        onChange={(e) => setBulkBuyerName(e.target.value)}
+                        placeholder="Company or Individual"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <Label>Email (optional)</Label>
+                        <Input
+                          type="email"
+                          value={bulkBuyerEmail}
+                          onChange={(e) => setBulkBuyerEmail(e.target.value)}
+                          placeholder="buyer@example.com"
+                        />
+                      </div>
+                      <div>
+                        <Label>Phone (optional)</Label>
+                        <Input
+                          type="tel"
+                          value={bulkBuyerPhone}
+                          onChange={(e) => setBulkBuyerPhone(e.target.value)}
+                          placeholder="+1234567890"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex items-start space-x-3 p-4 bg-white rounded-lg border">
+                  <Checkbox 
+                    id="createAvailable" 
+                    checked={createAvailableTickets}
+                    onCheckedChange={(checked) => setCreateAvailableTickets(checked as boolean)}
+                  />
+                  <div className="flex-1">
+                    <label htmlFor="createAvailable" className="text-sm font-medium cursor-pointer flex items-center gap-2">
+                      <Ticket className="w-4 h-4 text-green-600" />
+                      Create Available Tickets
+                    </label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Mark tickets outside bulk range as available for cashier sale
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
 
             {uploading && progress > 0 && (
               <div className="space-y-2">
@@ -726,7 +849,7 @@ const Upload = () => {
 
             <Button
               onClick={handleUpload}
-              disabled={!file || uploading || !selectedEventId || !bulkBuyerName.trim()}
+              disabled={!file || uploading || !selectedEventId || (uploadBulkTickets && !bulkBuyerName.trim()) || (!uploadBulkTickets && !createAvailableTickets)}
               className="w-full"
             >
               {uploading ? 'Processing...' : 'Upload Tickets'}
@@ -744,16 +867,16 @@ const Upload = () => {
                 <div className="p-4 bg-success/10 rounded-lg">
                   <p className="font-medium text-success">✓ Total Success: {uploadResults.success}</p>
                 </div>
-                {uploadResults.bulk > 0 && (
+                {uploadResults.bulkSold > 0 && (
                   <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                    <p className="font-medium text-blue-900">📦 Bulk Sold: {uploadResults.bulk}</p>
+                    <p className="font-medium text-blue-900">📦 Bulk Sold: {uploadResults.bulkSold}</p>
                     <p className="text-xs text-blue-700 mt-1">Pre-sold to {bulkBuyerName}</p>
                   </div>
                 )}
-                {uploadResults.cashier > 0 && (
-                  <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg">
-                    <p className="font-medium text-amber-900">🎫 Cashier Ready: {uploadResults.cashier}</p>
-                    <p className="text-xs text-amber-700 mt-1">Available for individual sale</p>
+                {uploadResults.availableCreated > 0 && (
+                  <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+                    <p className="font-medium text-green-900">💰 Available Created: {uploadResults.availableCreated}</p>
+                    <p className="text-xs text-green-700 mt-1">Ready for cashier sale</p>
                   </div>
                 )}
               </div>

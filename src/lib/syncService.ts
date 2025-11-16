@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 // Real-time synchronization service using BroadcastChannel
 // src/lib/realtimeSync.ts
 import { supabase } from '@/integrations/supabase/client';

@@ -6,6 +6,9 @@ import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/integrations/supabase/client';
 import { realtimeSync } from '@/lib/syncService';
 import { ArrowLeft } from 'lucide-react';
+import { getCache, setCache } from '@/lib/cache';
+import { optimizedSelect } from '@/lib/supabaseOptimized';
+import { throttle } from '@/lib/networkOptimizer';
 import dashboardIcon from '@/assets/icons/dashboard.png';
 import ticketIcon from '@/assets/icons/ticket.png';
 import analyticsIcon from '@/assets/icons/analytics.png';
@@ -31,31 +34,60 @@ const Dashboard = () => {
   });
   const [isLoadingStats, setIsLoadingStats] = useState(true);
 
-  // Optimized stats loading with parallel queries and caching
   const loadStats = useCallback(async () => {
     try {
       setIsLoadingStats(true);
 
-      // Parallel queries for better performance
-      const [ticketsResult, salesResult, usersResult] = await Promise.all([
-        supabase.from('tickets').select('status, sale_type', { count: 'exact' }),
-        supabase.from('sales').select('amount', { count: 'exact' }),
-        supabase.from('profiles').select('id', { count: 'exact', head: true }),
-      ]);
+      // Show cached stats immediately
+      const cachedStats = getCache<typeof stats>('dashboard:stats');
+      if (cachedStats) {
+        setStats(cachedStats);
+      }
 
-      const tickets = ticketsResult.data || [];
-      const sales = salesResult.data || [];
-      const totalUsers = usersResult.count || 0;
+      // Fetch tickets and sales data
+      const ticketsData = await optimizedSelect('tickets', {
+        select: 'status, sale_type',
+        deduplicate: true,
+      });
+
+      const salesData = await optimizedSelect('sales', {
+        select: 'amount',
+        deduplicate: true,
+      });
+
+      const { count: userCount } = await supabase
+        .from('profiles')
+        .select('id', { count: 'exact', head: true });
+
+      const tickets = ticketsData || [];
+      const sales = salesData || [];
+      const totalUsers = userCount || 0;
 
       // Calculate stats
-      const soldCount = tickets.filter(t => t.status === 'sold').length;
-      const usedCount = tickets.filter(t => t.status === 'used').length;
-      const availableCount = tickets.filter(t => t.status === 'available').length;
-      const bulkSoldCount = tickets.filter(t => t.status === 'sold' && t.sale_type === 'bulk').length;
-      const cashierSoldCount = tickets.filter(t => t.status === 'sold' && t.sale_type === 'cashier').length;
+      // Available tickets: status='available' AND sale_type='cashier'
+      const availableCount = tickets.filter(
+        (t) => t.status === 'available' && t.sale_type === 'cashier'
+      ).length;
+      
+      // Sold tickets: status='sold' (includes both bulk and cashier)
+      const soldCount = tickets.filter((t) => t.status === 'sold').length;
+      
+      // Used tickets: status='used'
+      const usedCount = tickets.filter((t) => t.status === 'used').length;
+      
+      // Bulk sold: status='sold' AND sale_type='bulk'
+      const bulkSoldCount = tickets.filter(
+        (t) => t.status === 'sold' && t.sale_type === 'bulk'
+      ).length;
+      
+      // Cashier sold: status='sold' AND sale_type='cashier'
+      const cashierSoldCount = tickets.filter(
+        (t) => t.status === 'sold' && t.sale_type === 'cashier'
+      ).length;
+      
       const totalSalesAmount = sales.reduce((sum, sale) => sum + Number(sale.amount || 0), 0);
 
-      setStats({
+      const newStats = {
         totalTickets: tickets.length,
         soldTickets: soldCount,
         usedTickets: usedCount,
@@ -64,7 +96,16 @@ const Dashboard = () => {
         cashierSold: cashierSoldCount,
         totalSales: totalSalesAmount,
         totalUsers,
-      });
+      };
+
+      setStats(newStats);
+
+      // Cache the stats
+      try {
+        await setCache('dashboard:stats', newStats, 1000 * 60 * 2);
+      } catch (err) {
+        console.debug('cache write failed', err);
+      }
     } catch (error) {
       console.error('Error loading stats:', error);
     } finally {
@@ -75,13 +116,13 @@ const Dashboard = () => {
   useEffect(() => {
     if (!user) return;
 
-    // Initial load
     loadStats();
 
-    // Subscribe to real-time updates
-    const unsubscribeTickets = realtimeSync.subscribe('tickets_updated', loadStats);
-    const unsubscribeSales = realtimeSync.subscribe('sales_updated', loadStats);
-    const unsubscribeProfiles = realtimeSync.subscribe('profiles_updated', loadStats);
+    const throttledRefresh = throttle(() => loadStats(), 2000);
+
+    const unsubscribeTickets = realtimeSync.subscribe('tickets_updated', throttledRefresh);
+    const unsubscribeSales = realtimeSync.subscribe('sales_updated', throttledRefresh);
+    const unsubscribeProfiles = realtimeSync.subscribe('profiles_updated', throttledRefresh);
 
     return () => {
       unsubscribeTickets();
@@ -140,7 +181,7 @@ const Dashboard = () => {
       </nav>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           <Card className="hover-lift border-l-4 border-l-accent animate-slide-up">
             <CardContent className="flex items-center p-6">
               <div className="w-14 h-14 bg-accent/10 rounded-xl flex items-center justify-center mr-4 shadow-sm">
@@ -177,19 +218,46 @@ const Dashboard = () => {
             </CardContent>
           </Card>
 
-          <Card className="hover-lift border-l-4 border-l-muted animate-slide-up" style={{ animationDelay: '150ms' }}>
+          <Card className="hover-lift border-l-4 border-l-green-500 animate-slide-up" style={{ animationDelay: '150ms' }}>
             <CardContent className="flex items-center p-6">
-              <div className="w-14 h-14 bg-muted rounded-xl flex items-center justify-center mr-4 shadow-sm">
+              <div className="w-14 h-14 bg-green-50 rounded-xl flex items-center justify-center mr-4 shadow-sm">
                 <img src={ticketIcon} alt="Tickets" className="w-7 h-7" />
               </div>
               <div>
                 <p className="text-sm font-medium text-muted-foreground mb-1">Available</p>
                 <p className="text-3xl font-bold text-foreground">{stats.availableTickets.toLocaleString()}</p>
+                <p className="text-xs text-muted-foreground mt-1">Ready for cashier</p>
               </div>
             </CardContent>
           </Card>
 
-          <Card className="hover-lift border-l-4 border-l-success animate-slide-up" style={{ animationDelay: '200ms' }}>
+          <Card className="hover-lift border-l-4 border-l-blue-500 animate-slide-up" style={{ animationDelay: '175ms' }}>
+            <CardContent className="flex items-center p-6">
+              <div className="w-14 h-14 bg-blue-50 rounded-xl flex items-center justify-center mr-4 shadow-sm">
+                <img src={uploadIcon} alt="Bulk" className="w-7 h-7" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-muted-foreground mb-1">Bulk Sold</p>
+                <p className="text-3xl font-bold text-foreground">{stats.bulkSold.toLocaleString()}</p>
+                <p className="text-xs text-muted-foreground mt-1">Pre-sold in CSV</p>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="hover-lift border-l-4 border-l-green-600 animate-slide-up" style={{ animationDelay: '200ms' }}>
+            <CardContent className="flex items-center p-6">
+              <div className="w-14 h-14 bg-green-100 rounded-xl flex items-center justify-center mr-4 shadow-sm">
+                <img src={cashierIcon} alt="Cashier" className="w-7 h-7" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-muted-foreground mb-1">Cashier Sold</p>
+                <p className="text-3xl font-bold text-foreground">{stats.cashierSold.toLocaleString()}</p>
+                <p className="text-xs text-muted-foreground mt-1">Individual sales</p>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="hover-lift border-l-4 border-l-success animate-slide-up" style={{ animationDelay: '225ms' }}>
             <CardContent className="flex items-center p-6">
               <div className="w-14 h-14 bg-success/10 rounded-xl flex items-center justify-center mr-4 shadow-sm">
                 <img src={moneyIcon} alt="Money" className="w-7 h-7" />

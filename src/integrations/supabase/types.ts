@@ -92,6 +92,7 @@ export type Database = {
           cashier_id: string
           created_at: string
           id: string
+          payment_mode: Database["public"]["Enums"]["payment_mode"]
           sale_timestamp: string
           ticket_id: string
         }
@@ -100,6 +101,7 @@ export type Database = {
           cashier_id: string
           created_at?: string
           id?: string
+          payment_mode?: Database["public"]["Enums"]["payment_mode"]
           sale_timestamp?: string
           ticket_id: string
         }
@@ -108,6 +110,7 @@ export type Database = {
           cashier_id?: string
           created_at?: string
           id?: string
+          payment_mode?: Database["public"]["Enums"]["payment_mode"]
           sale_timestamp?: string
           ticket_id?: string
         }
@@ -255,14 +258,21 @@ export type Database = {
           _buyer_email?: string | null
           _buyer_phone?: string | null
         }
-        Returns: void
+        Returns: Json
+      }
+      delete_user_cascade: {
+        Args: {
+          _user_id: string
+        }
+        Returns: Json
       }
     }
     Enums: {
-      app_role: "admin" | "cashier" | "scanner"
-      sale_type: "cashier" | "bulk"
-      ticket_status: "available" | "sold" | "used"
-    }
+       app_role: "admin" | "cashier" | "scanner"
+       payment_mode: "cash" | "card" | "mobile"
+       sale_type: "cashier" | "bulk"
+       ticket_status: "available" | "sold" | "used"
+     }
     CompositeTypes: {
       [_ in never]: never
     }

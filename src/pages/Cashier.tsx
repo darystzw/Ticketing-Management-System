@@ -10,7 +10,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
-import { ArrowLeft, AlertCircle } from 'lucide-react';
+import { getCache, removeCache, setCache } from '@/lib/cache';
+import useLocalStorage from '@/hooks/use-local-storage';
+import { optimizedSelect } from '@/lib/supabaseOptimized';
+import { throttle } from '@/lib/networkOptimizer';
+import { ArrowLeft, AlertCircle, CreditCard, Banknote, Smartphone } from 'lucide-react';
 import logoutIcon from '@/assets/icons/logout.png';
 import cashierIcon from '@/assets/icons/cashier.png';
 import moneyIcon from '@/assets/icons/money.png';
@@ -25,13 +29,20 @@ const Cashier = () => {
   const [buyerEmail, setBuyerEmail] = useState('');
   const [buyerPhone, setBuyerPhone] = useState('');
   const [amount, setAmount] = useState('50.00');
+  const [paymentMode, setPaymentMode] = useState<'cash' | 'card' | 'mobile'>('cash');
   const [isProcessing, setIsProcessing] = useState(false);
   const [recentSales, setRecentSales] = useState<any[]>([]);
   const [salesCount, setSalesCount] = useState(0);
   const [events, setEvents] = useState<any[]>([]);
-  const [selectedEventId, setSelectedEventId] = useState('');
+  const [selectedEventId, setSelectedEventId] = useLocalStorage<string>('cashier:selectedEventId', '');
 
   const loadEvents = useCallback(async () => {
+    const cached = getCache<any[]>('events_all');
+    if (cached && cached.length > 0) {
+      setEvents(cached);
+      if (!selectedEventId) setSelectedEventId(cached[0].id);
+    }
+
     const { data, error } = await supabase
       .from('events')
       .select('*')
@@ -39,44 +50,53 @@ const Cashier = () => {
 
     if (error) {
       console.error('Error loading events:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to load events',
-        variant: 'destructive',
-      });
+      if (!cached) {
+        toast({
+          title: 'Error',
+          description: 'Failed to load events',
+          variant: 'destructive',
+        });
+      }
       return;
     }
 
     if (data && data.length > 0) {
       setEvents(data);
-      if (!selectedEventId) {
-        setSelectedEventId(data[0].id);
-      }
+      await setCache('events_all', data, 1000 * 60 * 5);
+      if (!selectedEventId) setSelectedEventId(data[0].id);
     }
-  }, [toast, selectedEventId]);
+  }, [toast, selectedEventId, setSelectedEventId]);
 
   const loadRecentSales = useCallback(async () => {
     if (!user) return;
 
-    const { data } = await supabase
-      .from('sales')
-      .select(`
-        id,
-        amount,
-        sale_timestamp,
-        ticket_id,
-        tickets (
-          ticket_number,
-          ticket_code,
-          buyer_name
-        )
-      `)
-      .eq('cashier_id', user.id)
-      .order('sale_timestamp', { ascending: false })
-      .limit(10);
+    try {
+      const data = await optimizedSelect('sales', {
+        select: `
+          id,
+          amount,
+          sale_timestamp,
+          ticket_id,
+          payment_mode,
+          tickets (
+            ticket_number,
+            ticket_code,
+            buyer_name
+          )
+        `,
+        filters: { cashier_id: user.id },
+        deduplicate: true,
+      });
 
-    setRecentSales(data || []);
-    setSalesCount(data?.length || 0);
+      setRecentSales(
+        data
+          ?.sort((a, b) => new Date(b.sale_timestamp).getTime() - new Date(a.sale_timestamp).getTime())
+          .slice(0, 10) || []
+      );
+      setSalesCount(data?.length || 0);
+    } catch (error) {
+      console.error('Error loading recent sales:', error);
+    }
   }, [user]);
 
   useEffect(() => {
@@ -85,45 +105,47 @@ const Cashier = () => {
     loadEvents();
     loadRecentSales();
 
-    const unsubscribe = realtimeSync.subscribe('sales_updated', loadRecentSales);
+    const throttledRefresh = throttle(() => loadRecentSales(), 1500);
+
+    const unsubscribe = realtimeSync.subscribe('sales_updated', throttledRefresh);
     return () => unsubscribe();
   }, [user, loadRecentSales, loadEvents]);
 
   const getAvailableRange = (event: any) => {
+    // If event range not set yet (awaiting CSV)
+    if (event.range_start === 0 && event.range_end === 0) {
+      return null;
+    }
+
     // If no bulk range, entire event range available
     if (!event.bulk_sold_range_start || !event.bulk_sold_range_end) {
       return { start: event.range_start, end: event.range_end };
     }
 
+    // Collect all available ranges (before bulk, after bulk)
+    const availableRanges = [];
     const bulkStart = event.bulk_sold_range_start;
     const bulkEnd = event.bulk_sold_range_end;
     const eventStart = event.range_start;
     const eventEnd = event.range_end;
 
-    // If bulk range covers entire event range
-    if (bulkStart <= eventStart && bulkEnd >= eventEnd) {
-      return null; // Nothing available
+    // Before bulk range
+    if (eventStart < bulkStart) {
+      availableRanges.push({ start: eventStart, end: bulkStart - 1 });
     }
 
-    // Calculate available ranges
-    const beforeBulk = bulkStart > eventStart ? { start: eventStart, end: bulkStart - 1 } : null;
-    const afterBulk = bulkEnd < eventEnd ? { start: bulkEnd + 1, end: eventEnd } : null;
-
-    // Return the largest available range
-    if (beforeBulk && afterBulk) {
-      const beforeSize = beforeBulk.end - beforeBulk.start + 1;
-      const afterSize = afterBulk.end - afterBulk.start + 1;
-      return afterSize >= beforeSize ? afterBulk : beforeBulk;
+    // After bulk range
+    if (bulkEnd < eventEnd) {
+      availableRanges.push({ start: bulkEnd + 1, end: eventEnd });
     }
 
-    return beforeBulk || afterBulk || null;
-  };
-
-  const isTicketInBulkRange = (ticketNum: number, event: any): boolean => {
-    if (!event.bulk_sold_range_start || !event.bulk_sold_range_end) {
-      return false;
+    // If no available ranges
+    if (availableRanges.length === 0) {
+      return null;
     }
-    return ticketNum >= event.bulk_sold_range_start && ticketNum <= event.bulk_sold_range_end;
+
+    // Return the first available range
+    return availableRanges[0];
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -152,26 +174,23 @@ const Cashier = () => {
         throw new Error('Selected event not found');
       }
 
+      // Check if event has CSV uploaded
+      if (selectedEvent.range_start === 0 && selectedEvent.range_end === 0) {
+        throw new Error('Event is awaiting CSV upload. Please upload tickets first.');
+      }
+
       // Validate ticket is in event range
       if (ticketNum < selectedEvent.range_start || ticketNum > selectedEvent.range_end) {
         throw new Error(`Ticket must be between ${selectedEvent.range_start} and ${selectedEvent.range_end}`);
       }
 
-      // Check if ticket is in bulk sold range
-      if (isTicketInBulkRange(ticketNum, selectedEvent)) {
-        throw new Error(
-          `Ticket ${ticketNum} is in bulk sold range (${selectedEvent.bulk_sold_range_start}-${selectedEvent.bulk_sold_range_end}) and cannot be sold individually`
-        );
-      }
-
-      // Check available range
-      const availableRange = getAvailableRange(selectedEvent);
-      if (!availableRange) {
-        throw new Error('No tickets available - event fully sold in bulk');
-      }
-
-      if (ticketNum < availableRange.start || ticketNum > availableRange.end) {
-        throw new Error(`Ticket must be in available range: ${availableRange.start}-${availableRange.end}`);
+      // Check if ticket is in bulk range (not allowed to sell)
+      if (selectedEvent.bulk_sold_range_start && selectedEvent.bulk_sold_range_end) {
+        if (ticketNum >= selectedEvent.bulk_sold_range_start && ticketNum <= selectedEvent.bulk_sold_range_end) {
+          throw new Error(
+            `Ticket ${ticketNum} is in bulk sold range (${selectedEvent.bulk_sold_range_start}-${selectedEvent.bulk_sold_range_end}) and cannot be sold individually`
+          );
+        }
       }
 
       // Check if ticket already exists
@@ -182,7 +201,12 @@ const Cashier = () => {
         .eq('event_id', selectedEventId)
         .maybeSingle();
 
-      if (fetchError) throw fetchError;
+      if (fetchError) {
+        console.error('Fetch error:', fetchError);
+        throw new Error(`Failed to check ticket: ${fetchError.message}`);
+      }
+
+      let ticketId: string;
 
       if (existingTicket) {
         // Ticket exists - check status
@@ -196,11 +220,11 @@ const Cashier = () => {
           throw new Error('This is a bulk ticket and cannot be sold individually');
         }
 
-        // Update existing available ticket to sold
+        // Update available ticket to sold
         const { error: updateError } = await supabase
           .from('tickets')
           .update({
-            status: 'sold',
+            status: 'sold' as const,
             buyer_name: buyerName.trim(),
             buyer_email: buyerEmail.trim() || null,
             buyer_phone: buyerPhone.trim() || null,
@@ -208,36 +232,17 @@ const Cashier = () => {
             sold_by: user?.id
           })
           .eq('id', existingTicket.id)
-          .eq('status', 'available'); // Optimistic lock
+          .eq('status', 'available');
 
-        if (updateError) throw updateError;
-
-        // Create sale record
-        const { error: saleError } = await supabase
-          .from('sales')
-          .insert({
-            ticket_id: existingTicket.id,
-            cashier_id: user?.id,
-            amount: parseFloat(amount)
-          });
-
-        if (saleError) {
-          // Rollback
-          await supabase
-            .from('tickets')
-            .update({ 
-              status: 'available',
-              buyer_name: null,
-              buyer_email: null,
-              buyer_phone: null,
-              sold_at: null,
-              sold_by: null
-            })
-            .eq('id', existingTicket.id);
-          throw saleError;
+        if (updateError) {
+          console.error('Update error:', updateError);
+          throw new Error(`Failed to update ticket: ${updateError.message}`);
         }
+
+        ticketId = existingTicket.id;
+
       } else {
-        // Create new ticket for cashier sale
+        // Ticket doesn't exist - create new ticket and mark as sold
         const ticketCode = `T${ticketNum.toString().padStart(4, '0')}`;
         const qrData = `EVENT_${selectedEventId.substring(0, 8)}_TICKET_${ticketNum}`;
 
@@ -248,8 +253,8 @@ const Cashier = () => {
             ticket_code: ticketCode,
             qr_data: qrData,
             event_id: selectedEventId,
-            status: 'sold',
-            sale_type: 'cashier',
+            status: 'sold' as const,
+            sale_type: 'cashier' as const,
             buyer_name: buyerName.trim(),
             buyer_email: buyerEmail.trim() || null,
             buyer_phone: buyerPhone.trim() || null,
@@ -259,27 +264,62 @@ const Cashier = () => {
           .select()
           .single();
 
-        if (createError) throw createError;
-
-        // Create sale record
-        const { error: saleError } = await supabase
-          .from('sales')
-          .insert({
-            ticket_id: newTicket.id,
-            cashier_id: user?.id,
-            amount: parseFloat(amount)
-          });
-
-        if (saleError) {
-          // Delete ticket if sale fails
-          await supabase.from('tickets').delete().eq('id', newTicket.id);
-          throw saleError;
+        if (createError) {
+          console.error('Create error:', createError);
+          throw new Error(`Failed to create ticket: ${createError.message}`);
         }
+
+        if (!newTicket) {
+          throw new Error('Failed to create ticket: No data returned');
+        }
+
+        ticketId = newTicket.id;
+      }
+
+      // Create sale record
+      const { error: saleError } = await supabase
+        .from('sales')
+        .insert({
+          ticket_id: ticketId,
+          cashier_id: user?.id,
+          amount: parseFloat(amount),
+          payment_mode: paymentMode
+        });
+
+      if (saleError) {
+        console.error('Sale error:', saleError);
+        // Rollback ticket status
+        await supabase
+          .from('tickets')
+          .update({
+            status: existingTicket ? 'available' as const : 'sold' as const,
+            buyer_name: existingTicket ? null : buyerName.trim(),
+            buyer_email: existingTicket ? null : (buyerEmail.trim() || null),
+            buyer_phone: existingTicket ? null : (buyerPhone.trim() || null),
+            sold_at: existingTicket ? null : new Date().toISOString(),
+            sold_by: existingTicket ? null : user?.id
+          })
+          .eq('id', ticketId);
+        
+        if (!existingTicket) {
+          // If we created a new ticket, delete it
+          await supabase.from('tickets').delete().eq('id', ticketId);
+        }
+        
+        throw new Error(`Failed to create sale record: ${saleError.message}`);
+      }
+
+      // Invalidate cache
+      try {
+        removeCache('events_all');
+        removeCache('dashboard:stats');
+      } catch (err) {
+        console.debug('cache invalidate failed', err);
       }
 
       toast({
         title: 'Sale Complete',
-        description: `Ticket ${ticketNum} sold to ${buyerName}`,
+        description: `Ticket ${ticketNum} sold to ${buyerName} via ${paymentMode}`,
       });
 
       // Clear form
@@ -288,6 +328,10 @@ const Cashier = () => {
       setBuyerEmail('');
       setBuyerPhone('');
       setAmount('50.00');
+      setPaymentMode('cash');
+
+      // Refresh sales list
+      await loadRecentSales();
 
     } catch (error: any) {
       console.error('Sale error:', error);
@@ -304,6 +348,17 @@ const Cashier = () => {
   const handleLogout = () => {
     signOut();
     navigate('/login');
+  };
+
+  const getPaymentIcon = (mode: string) => {
+    switch (mode) {
+      case 'card':
+        return <CreditCard className="w-4 h-4" />;
+      case 'mobile':
+        return <Smartphone className="w-4 h-4" />;
+      default:
+        return <Banknote className="w-4 h-4" />;
+    }
   };
 
   if (!user) return null;
@@ -373,25 +428,35 @@ const Cashier = () => {
                   </Select>
                 </div>
 
+                {selectedEvent && selectedEvent.range_start === 0 && selectedEvent.range_end === 0 && (
+                  <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg flex items-start gap-2">
+                    <AlertCircle className="w-5 h-5 text-yellow-600 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-medium text-yellow-900">Event Awaiting Upload</p>
+                      <p className="text-xs text-yellow-700">Please upload CSV tickets first</p>
+                    </div>
+                  </div>
+                )}
+
                 {selectedEvent && availableRange && (
-                  <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                    <p className="text-sm font-medium text-blue-900">
+                  <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+                    <p className="text-sm font-medium text-green-900">
                       Available Range: {availableRange.start} - {availableRange.end}
                     </p>
                     {selectedEvent.bulk_sold_range_start && (
-                      <p className="text-xs text-blue-700 mt-1">
+                      <p className="text-xs text-green-700 mt-1">
                         Bulk sold: {selectedEvent.bulk_sold_range_start}-{selectedEvent.bulk_sold_range_end}
                       </p>
                     )}
                   </div>
                 )}
 
-                {selectedEvent && !availableRange && (
+                {selectedEvent && selectedEvent.range_start > 0 && !availableRange && (
                   <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
                     <AlertCircle className="w-5 h-5 text-red-600 mt-0.5" />
                     <div>
                       <p className="text-sm font-medium text-red-900">No Tickets Available</p>
-                      <p className="text-xs text-red-700">Event fully sold in bulk</p>
+                      <p className="text-xs text-red-700">All tickets in bulk sold range</p>
                     </div>
                   </div>
                 )}
@@ -461,6 +526,53 @@ const Cashier = () => {
                   />
                 </div>
 
+                <div className="space-y-2">
+                  <Label>Payment Mode *</Label>
+                  <div className="grid grid-cols-3 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setPaymentMode('cash')}
+                      disabled={!availableRange}
+                      className={`flex flex-col items-center justify-center p-4 rounded-lg border-2 transition-all ${
+                        paymentMode === 'cash'
+                          ? 'border-success bg-success/10 text-success'
+                          : 'border-border hover:border-success/50'
+                      } ${!availableRange ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                    >
+                      <Banknote className="w-6 h-6 mb-2" />
+                      <span className="text-sm font-medium">Cash</span>
+                    </button>
+                    
+                    <button
+                      type="button"
+                      onClick={() => setPaymentMode('card')}
+                      disabled={!availableRange}
+                      className={`flex flex-col items-center justify-center p-4 rounded-lg border-2 transition-all ${
+                        paymentMode === 'card'
+                          ? 'border-blue-600 bg-blue-50 text-blue-600'
+                          : 'border-border hover:border-blue-600/50'
+                      } ${!availableRange ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                    >
+                      <CreditCard className="w-6 h-6 mb-2" />
+                      <span className="text-sm font-medium">Card</span>
+                    </button>
+                    
+                    <button
+                      type="button"
+                      onClick={() => setPaymentMode('mobile')}
+                      disabled={!availableRange}
+                      className={`flex flex-col items-center justify-center p-4 rounded-lg border-2 transition-all ${
+                        paymentMode === 'mobile'
+                          ? 'border-purple-600 bg-purple-50 text-purple-600'
+                          : 'border-border hover:border-purple-600/50'
+                      } ${!availableRange ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                    >
+                      <Smartphone className="w-6 h-6 mb-2" />
+                      <span className="text-sm font-medium">Mobile</span>
+                    </button>
+                  </div>
+                </div>
+
                 <Button 
                   type="submit" 
                   className="w-full h-12 text-lg" 
@@ -500,6 +612,10 @@ const Cashier = () => {
                             {sale.tickets?.ticket_code || `#${sale.tickets?.ticket_number}`}
                           </p>
                           <p className="text-sm text-muted-foreground">{sale.tickets?.buyer_name}</p>
+                          <div className="flex items-center gap-1 mt-1">
+                            {getPaymentIcon(sale.payment_mode)}
+                            <span className="text-xs text-muted-foreground capitalize">{sale.payment_mode}</span>
+                          </div>
                         </div>
                       </div>
                       <div className="text-right">

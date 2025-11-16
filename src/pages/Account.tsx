@@ -151,23 +151,16 @@ const Account = () => {
     setIsDeleting(true);
 
     try {
-      // Delete user roles first (foreign key constraint)
-      await supabase
-        .from('user_roles')
-        .delete()
-        .eq('user_id', userToDelete.id);
+      // Call RPC function to delete user cascade (auth + profile + roles)
+      const { data, error: rpcError } = await supabase.rpc('delete_user_cascade', {
+        _user_id: userToDelete.id
+      }) as { data: { success: boolean; message?: string } | null; error: Error | null };
 
-      // Delete profile
-      const { error: profileError } = await supabase
-        .from('profiles')
-        .delete()
-        .eq('id', userToDelete.id);
+      if (rpcError) throw rpcError;
 
-      if (profileError) throw profileError;
-
-      // Note: Deleting auth user requires admin API or service role
-      // For now, we'll just delete the profile and roles
-      // The auth user will exist but won't be able to access the system
+      if (data && !data.success) {
+        throw new Error(data.message || 'Failed to delete user');
+      }
 
       toast({
         title: 'User Deleted',
