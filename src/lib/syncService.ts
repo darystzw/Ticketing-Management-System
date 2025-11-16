@@ -2,6 +2,7 @@
 // Real-time synchronization service using BroadcastChannel
 // src/lib/realtimeSync.ts
 import { supabase } from '@/integrations/supabase/client';
+import { perfLogger } from './performanceLogger';
 
 type SyncEventType = 'tickets_updated' | 'sales_updated' | 'scans_updated' | 'profiles_updated';
 
@@ -28,11 +29,14 @@ class RealtimeSyncService {
 
     // Delay real-time setup to improve initial load performance
     setTimeout(() => {
+      perfLogger.start('realtime-setup');
       this.setupSupabaseRealtime();
+      perfLogger.end('realtime-setup');
     }, 2000);
   }
 
   private setupSupabaseRealtime() {
+    perfLogger.start('realtime-subscribe-channels');
     // Single channel for all ticket changes
     const ticketsChannel = supabase
       .channel('all-tickets-changes')
@@ -70,6 +74,8 @@ class RealtimeSyncService {
       .subscribe();
 
     this.supabaseChannels = [ticketsChannel, salesChannel, profilesChannel];
+    perfLogger.end('realtime-subscribe-channels');
+    perfLogger.log('realtime-channels-count', this.supabaseChannels.length);
   }
 
   // Subscribe to specific event type

@@ -3,6 +3,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { Session, User } from '@supabase/supabase-js';
+import { perfLogger, measureAsync } from '@/lib/performanceLogger';
 
 interface UserProfile {
   id: string;
@@ -29,9 +30,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Load user profile with roles
+  // Load user profile with roles (with caching)
   const loadProfile = async (userId: string) => {
     try {
+      // Check cache first (localStorage for profile data)
+      const cacheKey = `profile_${userId}`;
+      const cached = localStorage.getItem(cacheKey);
+      const now = Date.now();
+
+      if (cached) {
+        const { data: cachedData, timestamp } = JSON.parse(cached);
+        // Use cache if less than 5 minutes old
+        if (now - timestamp < 5 * 60 * 1000) {
+          setProfile(cachedData);
+          return;
+        }
+      }
+
       const { data: profileData } = await supabase
         .from('profiles')
         .select(`
@@ -55,12 +70,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return;
         }
 
-        setProfile({
+        const profile = {
           id: profileData.id,
           email: profileData.email,
           name: profileData.name,
           roles: profileData.user_roles?.map((r: any) => r.role) || []
-        });
+        };
+
+        // Cache the profile
+        localStorage.setItem(cacheKey, JSON.stringify({
+          data: profile,
+          timestamp: now
+        }));
+
+        setProfile(profile);
       }
     } catch (error) {
       console.error('Failed to load profile:', error);
@@ -70,18 +93,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let mounted = true;
 
+    perfLogger.start('auth-initialization');
+
     // Check for existing session FIRST
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
+    measureAsync('auth-getSession', () => supabase.auth.getSession()).then(async ({ data: { session } }) => {
       if (!mounted) return;
       
       setSession(session);
       setUser(session?.user ?? null);
 
       if (session?.user) {
-        await loadProfile(session.user.id);
+        await measureAsync('auth-loadProfile', () => loadProfile(session.user.id));
       }
 
       setIsLoading(false);
+      perfLogger.end('auth-initialization');
     });
 
     // Set up auth state listener for future changes
@@ -89,16 +115,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       async (_event, session) => {
         if (!mounted) return;
         
+        perfLogger.start('auth-stateChange');
         setSession(session);
         setUser(session?.user ?? null);
 
         if (session?.user) {
-          await loadProfile(session.user.id);
+          await measureAsync('auth-loadProfile-onChange', () => loadProfile(session.user.id));
         } else {
           setProfile(null);
         }
 
         setIsLoading(false);
+        perfLogger.end('auth-stateChange');
       }
     );
 
@@ -109,10 +137,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = async () => {
-    await supabase.auth.signOut();
-    setUser(null);
-    setProfile(null);
-    setSession(null);
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) {
+        console.error('Sign out error:', error);
+      }
+    } catch (err) {
+      console.error('Sign out unexpected error:', err);
+    } finally {
+      // Clear local state and cached profile
+      try {
+        if (profile?.id) {
+          localStorage.removeItem(`profile_${profile.id}`);
+        }
+      } catch (e) {
+        // ignore localStorage failures
+      }
+      setUser(null);
+      setProfile(null);
+      setSession(null);
+    }
   };
 
   const hasRole = (role: string): boolean => {

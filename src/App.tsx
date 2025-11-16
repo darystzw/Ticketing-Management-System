@@ -37,10 +37,10 @@ const App = () => (
                 <Route path="/" element={<Index />} />
                 <Route path="/login" element={<Login />} />
                 <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-                <Route path="/scanner" element={<ProtectedRoute><Scanner /></ProtectedRoute>} />
-                <Route path="/cashier" element={<ProtectedRoute><Cashier /></ProtectedRoute>} />
-                <Route path="/upload" element={<ProtectedRoute><Upload /></ProtectedRoute>} />
-                <Route path="/account" element={<ProtectedRoute><Account /></ProtectedRoute>} />
+                <Route path="/scanner" element={<ProtectedRoute requireRole={["scanner","admin","cashier"]}><Scanner /></ProtectedRoute>} />
+                <Route path="/cashier" element={<ProtectedRoute requireRole={["cashier","admin"]}><Cashier /></ProtectedRoute>} />
+                <Route path="/upload" element={<ProtectedRoute requireRole="admin"><Upload /></ProtectedRoute>} />
+                <Route path="/account" element={<ProtectedRoute requireRole="admin"><Account /></ProtectedRoute>} />
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </Suspense>

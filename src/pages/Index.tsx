@@ -133,17 +133,23 @@ const Index = () => {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {features.map((feature, index) => (
-            <Card
-              key={feature.path}
-              className="hover-lift cursor-pointer border border-border/50 hover:border-primary/50 transition-all duration-300 overflow-hidden group animate-slide-up"
-              style={{ animationDelay: `${index * 100}ms` }}
-              onClick={() => navigate(feature.path)}
-            >
-              <CardContent className="p-6 relative">
-                <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
-                <div className="relative">
-                  <div className="flex items-start mb-4">
+          {features.map((feature, index) => {
+            // Role-based visibility: only show feature cards when user has appropriate role
+            if (feature.path === '/account' && !profile?.roles?.includes('admin')) return null;
+            if (feature.path === '/upload' && !profile?.roles?.includes('admin')) return null;
+            if (feature.path === '/cashier' && !profile?.roles?.some(r => r === 'cashier' || r === 'admin')) return null;
+            if (feature.path === '/scanner' && !profile?.roles?.some(r => r === 'scanner' || r === 'admin' || r === 'cashier')) return null;
+
+            return (
+              <Card
+                key={feature.path}
+                className="hover-lift cursor-pointer border border-border/50 hover:border-primary/50 transition-all duration-300 overflow-hidden group animate-slide-up"
+                style={{ animationDelay: `${index * 100}ms` }}
+                onClick={() => navigate(feature.path)}
+              >
+                <CardContent className="p-6 relative">
+                  <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                  <div className="relative">
                     <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mr-4 ${feature.color} shadow-lg group-hover:scale-110 group-hover:shadow-xl transition-all duration-300 p-2`}>
                       <img src={feature.icon} alt={feature.title} className="w-full h-full object-contain" />
                     </div>
@@ -153,10 +159,10 @@ const Index = () => {
                     </div>
                   </div>
                   <p className="text-sm text-muted-foreground leading-relaxed">{feature.description}</p>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
       </div>
     </div>

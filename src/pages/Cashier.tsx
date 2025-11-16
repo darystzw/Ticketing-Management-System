@@ -345,8 +345,8 @@ const Cashier = () => {
     }
   };
 
-  const handleLogout = () => {
-    signOut();
+  const handleLogout = async () => {
+    await signOut();
     navigate('/login');
   };
 

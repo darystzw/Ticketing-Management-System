@@ -7,7 +7,7 @@ import { ShieldAlert } from 'lucide-react';
 
 interface ProtectedRouteProps {
   children: ReactNode;
-  requireRole?: string; // Optional: require specific role
+  requireRole?: string | string[]; // Optional: require specific role or one of roles
 }
 
 export function ProtectedRoute({ children, requireRole }: ProtectedRouteProps) {
@@ -28,31 +28,36 @@ export function ProtectedRoute({ children, requireRole }: ProtectedRouteProps) {
     return <Navigate to="/login" replace />;
   }
 
-  // Check role-based access if required
-  if (requireRole && !hasRole(requireRole)) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-background p-4">
-        <Card className="max-w-md w-full">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-warning">
-              <ShieldAlert className="w-6 h-6" />
-              Access Denied
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-muted-foreground">
-              You don't have permission to access this page. This page requires the <span className="font-semibold">{requireRole}</span> role.
-            </p>
-            <Button
-              onClick={() => window.location.href = '/'}
-              className="w-full"
-            >
-              Go to Home
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
-    );
+  // Check role-based access if required (support single role or array of roles)
+  if (requireRole) {
+    const allowed = Array.isArray(requireRole) ? requireRole : [requireRole];
+    const ok = allowed.some((r) => hasRole(r));
+
+    if (!ok) {
+      return (
+        <div className="flex items-center justify-center min-h-screen bg-background p-4">
+          <Card className="max-w-md w-full">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-warning">
+                <ShieldAlert className="w-6 h-6" />
+                Access Denied
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-muted-foreground">
+                You don't have permission to access this page. This page requires one of the roles: <span className="font-semibold">{allowed.join(', ')}</span>.
+              </p>
+              <Button
+                onClick={() => window.location.href = '/'}
+                className="w-full"
+              >
+                Go to Home
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      );
+    }
   }
 
   return <>{children}</>;

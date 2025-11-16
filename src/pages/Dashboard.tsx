@@ -9,6 +9,7 @@ import { ArrowLeft } from 'lucide-react';
 import { getCache, setCache } from '@/lib/cache';
 import { optimizedSelect } from '@/lib/supabaseOptimized';
 import { throttle } from '@/lib/networkOptimizer';
+import { perfLogger, measureAsync } from '@/lib/performanceLogger';
 import dashboardIcon from '@/assets/icons/dashboard.png';
 import ticketIcon from '@/assets/icons/ticket.png';
 import analyticsIcon from '@/assets/icons/analytics.png';
@@ -36,28 +37,38 @@ const Dashboard = () => {
 
   const loadStats = useCallback(async () => {
     try {
+      perfLogger.start('dashboard-loadStats');
       setIsLoadingStats(true);
 
       // Show cached stats immediately
+      perfLogger.start('dashboard-getCache');
       const cachedStats = getCache<typeof stats>('dashboard:stats');
+      perfLogger.end('dashboard-getCache');
+      
       if (cachedStats) {
         setStats(cachedStats);
+        perfLogger.log('dashboard-cache-hit', 0);
       }
 
       // Fetch tickets and sales data
-      const ticketsData = await optimizedSelect('tickets', {
-        select: 'status, sale_type',
-        deduplicate: true,
-      });
+      const ticketsData = await measureAsync('dashboard-fetch-tickets', () =>
+        optimizedSelect('tickets', {
+          select: 'status, sale_type',
+          deduplicate: true,
+        })
+      );
 
-      const salesData = await optimizedSelect('sales', {
-        select: 'amount',
-        deduplicate: true,
-      });
+      const salesData = await measureAsync('dashboard-fetch-sales', () =>
+        optimizedSelect('sales', {
+          select: 'amount',
+          deduplicate: true,
+        })
+      );
 
-      const { count: userCount } = await supabase
-        .from('profiles')
-        .select('id', { count: 'exact', head: true });
+      const userCountResult = await measureAsync('dashboard-fetch-userCount', async () =>
+        await supabase.from('profiles').select('id', { count: 'exact', head: true })
+      );
+      const { count: userCount } = (userCountResult as unknown as { count?: number | null }) || {};
 
       const tickets = ticketsData || [];
       const sales = salesData || [];
@@ -102,12 +113,17 @@ const Dashboard = () => {
 
       // Cache the stats
       try {
-        await setCache('dashboard:stats', newStats, 1000 * 60 * 2);
+        perfLogger.start('dashboard-setCache');
+        setCache('dashboard:stats', newStats, 1000 * 60 * 2);
+        perfLogger.end('dashboard-setCache');
       } catch (err) {
         console.debug('cache write failed', err);
       }
+      
+      perfLogger.end('dashboard-loadStats');
     } catch (error) {
       console.error('Error loading stats:', error);
+      perfLogger.end('dashboard-loadStats');
     } finally {
       setIsLoadingStats(false);
     }
@@ -132,8 +148,10 @@ const Dashboard = () => {
   }, [user, loadStats]);
 
   const handleLogout = () => {
-    signOut();
-    navigate('/login');
+    (async () => {
+      await signOut();
+      navigate('/login');
+    })();
   };
 
   if (isLoading) {
@@ -289,49 +307,57 @@ const Dashboard = () => {
               <span className="text-xs px-2 py-1 bg-primary/10 text-primary rounded-full">Shortcuts</span>
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              <Button
-                className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
-                variant="outline"
-                onClick={() => navigate('/cashier')}
-              >
-                <div className="w-12 h-12 bg-success/10 rounded-xl flex items-center justify-center">
-                  <img src={cashierIcon} alt="Cashier" className="w-7 h-7" />
-                </div>
-                <span className="font-semibold">Sell Tickets</span>
-              </Button>
+              {(profile?.roles?.includes('cashier') || profile?.roles?.includes('admin')) && (
+                <Button
+                  className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
+                  variant="outline"
+                  onClick={() => navigate('/cashier')}
+                >
+                  <div className="w-12 h-12 bg-success/10 rounded-xl flex items-center justify-center">
+                    <img src={cashierIcon} alt="Cashier" className="w-7 h-7" />
+                  </div>
+                  <span className="font-semibold">Sell Tickets</span>
+                </Button>
+              )}
 
-              <Button
-                className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
-                variant="outline"
-                onClick={() => navigate('/scanner')}
-              >
-                <div className="w-12 h-12 bg-warning/10 rounded-xl flex items-center justify-center">
-                  <img src={scannerIcon} alt="Scanner" className="w-7 h-7" />
-                </div>
-                <span className="font-semibold">Scan Tickets</span>
-              </Button>
+              {(profile?.roles?.includes('scanner') || profile?.roles?.includes('admin') || profile?.roles?.includes('cashier')) && (
+                <Button
+                  className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
+                  variant="outline"
+                  onClick={() => navigate('/scanner')}
+                >
+                  <div className="w-12 h-12 bg-warning/10 rounded-xl flex items-center justify-center">
+                    <img src={scannerIcon} alt="Scanner" className="w-7 h-7" />
+                  </div>
+                  <span className="font-semibold">Scan Tickets</span>
+                </Button>
+              )}
 
-              <Button
-                className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
-                variant="outline"
-                onClick={() => navigate('/upload')}
-              >
-                <div className="w-12 h-12 bg-accent/10 rounded-xl flex items-center justify-center">
-                  <img src={uploadIcon} alt="Upload" className="w-7 h-7" />
-                </div>
-                <span className="font-semibold">Upload Tickets</span>
-              </Button>
+              {profile?.roles?.includes('admin') && (
+                <Button
+                  className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
+                  variant="outline"
+                  onClick={() => navigate('/upload')}
+                >
+                  <div className="w-12 h-12 bg-accent/10 rounded-xl flex items-center justify-center">
+                    <img src={uploadIcon} alt="Upload" className="w-7 h-7" />
+                  </div>
+                  <span className="font-semibold">Upload Tickets</span>
+                </Button>
+              )}
 
-              <Button
-                variant="outline"
-                className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
-                onClick={() => navigate('/account')}
-              >
-                <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center">
-                  <img src={userIcon} alt="Users" className="w-7 h-7" />
-                </div>
-                <span className="font-semibold">My Account</span>
-              </Button>
+              {profile?.roles?.includes('admin') && (
+                <Button
+                  variant="outline"
+                  className="h-32 flex flex-col items-center justify-center gap-3 hover-lift"
+                  onClick={() => navigate('/account')}
+                >
+                  <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center">
+                    <img src={userIcon} alt="Users" className="w-7 h-7" />
+                  </div>
+                  <span className="font-semibold">My Account</span>
+                </Button>
+              )}
             </div>
           </CardContent>
         </Card>

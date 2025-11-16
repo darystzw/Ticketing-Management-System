@@ -22,7 +22,7 @@ import { realtimeSync } from '@/lib/syncService';
 const Scanner = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { user, profile, signOut } = useAuth();
+  const { user, profile, signOut, hasRole } = useAuth();
   const [ticketNumber, setTicketNumber] = useState('');
   const [qrCode, setQrCode] = useState('');
   const [isScanning, setIsScanning] = useState(false);
@@ -114,9 +114,22 @@ const Scanner = () => {
     e.preventDefault();
 
     if ((!ticketNumber.trim() && !qrCode.trim()) || !selectedEventId) {
+      const message = hasRole('admin')
+        ? 'Please enter ticket number or QR code and select an event'
+        : 'Please enter QR code and select an event';
       toast({
         title: 'Error',
-        description: 'Please enter ticket number or QR code and select an event',
+        description: message,
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    // Check if user is trying to scan by ticket number but is not admin
+    if (ticketNumber.trim() && !hasRole('admin')) {
+      toast({
+        title: 'Access Denied',
+        description: 'Ticket number scanning is restricted to admin users only. Please use QR code scanning.',
         variant: 'destructive',
       });
       return;
@@ -285,8 +298,8 @@ const Scanner = () => {
     }
   };
 
-  const handleLogout = () => {
-    signOut();
+  const handleLogout = async () => {
+    await signOut();
     navigate('/login');
   };
 
@@ -380,7 +393,12 @@ const Scanner = () => {
                 )}
 
                 <div className="space-y-2">
-                  <Label htmlFor="qrCode">QR Code</Label>
+                  <Label htmlFor="qrCode">
+                    QR Code
+                    {!hasRole('admin') && (
+                      <span className="text-xs text-muted-foreground ml-2">(Ticket numbers restricted to admins)</span>
+                    )}
+                  </Label>
                   <Input
                     id="qrCode"
                     placeholder="Scan or enter QR code"
@@ -394,27 +412,31 @@ const Scanner = () => {
                   />
                 </div>
 
-                <div className="flex items-center gap-4">
-                  <div className="flex-1 border-t"></div>
-                  <span className="text-sm text-muted-foreground">OR</span>
-                  <div className="flex-1 border-t"></div>
-                </div>
+                {hasRole('admin') && (
+                  <>
+                    <div className="flex items-center gap-4">
+                      <div className="flex-1 border-t"></div>
+                      <span className="text-sm text-muted-foreground">OR</span>
+                      <div className="flex-1 border-t"></div>
+                    </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="ticketNumber">Ticket Number</Label>
-                  <Input
-                    id="ticketNumber"
-                    type="number"
-                    placeholder="Enter ticket number"
-                    value={ticketNumber}
-                    onChange={(e) => {
-                      setTicketNumber(e.target.value);
-                      setLastScanResult(null);
-                    }}
-                    disabled={selectedEvent?.range_start === 0}
-                    className="text-lg"
-                  />
-                </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="ticketNumber">Ticket Number (Admin Only)</Label>
+                      <Input
+                        id="ticketNumber"
+                        type="number"
+                        placeholder="Enter ticket number"
+                        value={ticketNumber}
+                        onChange={(e) => {
+                          setTicketNumber(e.target.value);
+                          setLastScanResult(null);
+                        }}
+                        disabled={selectedEvent?.range_start === 0}
+                        className="text-lg"
+                      />
+                    </div>
+                  </>
+                )}
 
                 <Button 
                   type="submit" 
