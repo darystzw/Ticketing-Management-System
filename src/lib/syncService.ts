@@ -26,8 +26,10 @@ class RealtimeSyncService {
       };
     }
 
-    // Set up Supabase real-time subscriptions
-    this.setupSupabaseRealtime();
+    // Delay real-time setup to improve initial load performance
+    setTimeout(() => {
+      this.setupSupabaseRealtime();
+    }, 2000);
   }
 
   private setupSupabaseRealtime() {
