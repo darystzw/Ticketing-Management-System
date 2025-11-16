@@ -13,9 +13,26 @@ A comprehensive event ticket management system with support for bulk ticket sale
 
 ## Recent Changes (November 2025)
 
+### Admin Bootstrap and Role Management (2025-11-11)
+
+- **Migration File:** `supabase/migrations/bin/20251111055558_08f13573-eb39-4f73-9759-aed3303df420.sql`
+- **Changes:**
+  - Added `has_any_admin()` function to detect existing admins
+  - Improved role management policies with proper RLS
+  - Bootstrap policy allowing creation of the first admin by any authenticated user
+
+### User Banning Feature (2025-11-13)
+
+- **Migration File:** `supabase/migrations/bin/20251113073900_add_banned_column.sql`
+- **Changes:**
+  - Added `banned` BOOLEAN column to `profiles` table (default: FALSE)
+  - Added `is_user_banned(user_id)` function for checking ban status
+  - Index on `banned` column for query performance
+  - RLS policies updated to prevent banned users from system access
+
 ### Schema v2.0 Migration - Complete Bulk Sales Support
 
-- **Migration File:** `supabase/migrations/20251114_complete_schema_v2.sql`
+- **Migration File:** `supabase/migrations/bin/20251114_complete_schema_v2.sql`
 - **Status:** ✅ Complete with backfill logic
 
 #### New Features
@@ -124,14 +141,16 @@ A comprehensive event ticket management system with support for bulk ticket sale
 - **events**: Event metadata, date/time, ticket ranges, bulk sale tracking
 - **tickets**: Individual ticket records with sale_type classification
 - **sales**: Cashier sale transactions (bulk sales tracked via events table)
-- **profiles**: User profiles
+- **profiles**: User profiles with ban status (banned column)
 - **user_roles**: Role-based access control
 
 ## Key Files
 
 ### Schema & Types
 
-- `supabase/migrations/20251114_complete_schema_v2.sql` - Complete schema with bulk support
+- `supabase/migrations/bin/20251111055558_08f13573-eb39-4f73-9759-aed3303df420.sql` - Admin bootstrap and role management
+- `supabase/migrations/bin/20251113073900_add_banned_column.sql` - User banning feature
+- `supabase/migrations/bin/20251114_complete_schema_v2.sql` - Complete schema with bulk support
 - `src/integrations/supabase/types.ts` - TypeScript types matching database schema
 
 ### Pages
@@ -172,6 +191,17 @@ A comprehensive event ticket management system with support for bulk ticket sale
 4. Marks ticket as 'used' upon successful validation
 
 ## Environment Setup
+
+### Prerequisites
+
+- Node.js (v16 or higher)
+- npm or yarn
+
+### Installation
+
+```bash
+npm install
+```
 
 ### Required Secrets
 

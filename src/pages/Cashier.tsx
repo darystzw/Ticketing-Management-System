@@ -71,33 +71,67 @@ const Cashier = () => {
     if (!user) return;
 
     try {
-      const data = await optimizedSelect('sales', {
-        select: `
-          id,
-          amount,
-          sale_timestamp,
-          ticket_id,
-          payment_mode,
-          tickets (
-            ticket_number,
-            ticket_code,
-            buyer_name
-          )
-        `,
-        filters: { cashier_id: user.id },
-        deduplicate: true,
-      });
+      let data: any[] | null = null;
+
+      // If an event is selected, load recent sales for that event so cashiers see admin sales too
+      if (selectedEventId) {
+        const { data: eventSales, error } = await supabase
+          .from('sales')
+          .select(`
+            id,
+            amount,
+            sale_timestamp,
+            ticket_id,
+            payment_mode,
+            cashier_id,
+            tickets (
+              ticket_number,
+              ticket_code,
+              buyer_name,
+              event_id
+            )
+          `)
+          .eq('tickets.event_id', selectedEventId)
+          .order('sale_timestamp', { ascending: false })
+          .limit(50);
+
+        if (error) {
+          console.error('Error loading event sales:', error);
+        } else {
+          data = eventSales as any[] | null;
+        }
+      } else {
+        // Fallback: load only current cashier's sales
+        data = await optimizedSelect('sales', {
+          select: `
+            id,
+            amount,
+            sale_timestamp,
+            ticket_id,
+            payment_mode,
+            tickets (
+              ticket_number,
+              ticket_code,
+              buyer_name
+            )
+          `,
+          filters: { cashier_id: user.id },
+          deduplicate: true,
+        });
+      }
 
       setRecentSales(
         data
-          ?.sort((a, b) => new Date(b.sale_timestamp).getTime() - new Date(a.sale_timestamp).getTime())
-          .slice(0, 10) || []
+          ? data
+              .sort((a, b) => new Date(b.sale_timestamp).getTime() - new Date(a.sale_timestamp).getTime())
+              .slice(0, 10)
+          : []
       );
       setSalesCount(data?.length || 0);
     } catch (error) {
       console.error('Error loading recent sales:', error);
     }
-  }, [user]);
+  }, [user, selectedEventId]);
 
   useEffect(() => {
     if (!user) return;
