@@ -4,17 +4,18 @@
 import { supabase } from '@/integrations/supabase/client';
 import { perfLogger } from './performanceLogger';
 
-type SyncEventType = 'tickets_updated' | 'sales_updated' | 'scans_updated' | 'profiles_updated';
+export type SyncEventType = 'tickets_updated' | 'sales_updated' | 'scans_updated' | 'profiles_updated' | 'ticket_scanned';
 
-interface SyncMessage {
+export interface SyncMessage {
   type: SyncEventType;
   timestamp: string;
   userId?: string;
+  data?: any;
 }
 
 class RealtimeSyncService {
   private channel: BroadcastChannel | null = null;
-  private listeners: Map<SyncEventType, Set<() => void>> = new Map();
+  private listeners: Map<SyncEventType, Set<(message: SyncMessage) => void>> = new Map();
   private supabaseChannels: any[] = [];
 
   constructor() {
@@ -23,7 +24,7 @@ class RealtimeSyncService {
       this.channel = new BroadcastChannel('ticket-sync');
       this.channel.onmessage = (event) => {
         const message: SyncMessage = event.data;
-        this.notifyListeners(message.type);
+        this.notifyListeners(message);
       };
     }
 
@@ -79,7 +80,7 @@ class RealtimeSyncService {
   }
 
   // Subscribe to specific event type
-  subscribe(eventType: SyncEventType, callback: () => void): () => void {
+  subscribe(eventType: SyncEventType, callback: (message: SyncMessage) => void): () => void {
     if (!this.listeners.has(eventType)) {
       this.listeners.set(eventType, new Set());
     }
@@ -92,11 +93,12 @@ class RealtimeSyncService {
   }
 
   // Broadcast event to all tabs and notify local listeners
-  broadcast(type: SyncEventType, userId?: string) {
+  broadcast(type: SyncEventType, userId?: string, data?: any) {
     const message: SyncMessage = {
       type,
       timestamp: new Date().toISOString(),
       userId,
+      data,
     };
 
     // Broadcast to other tabs
@@ -105,15 +107,15 @@ class RealtimeSyncService {
     }
 
     // Notify local listeners immediately
-    this.notifyListeners(type);
+    this.notifyListeners(message);
   }
 
-  private notifyListeners(type: SyncEventType) {
-    const listeners = this.listeners.get(type);
+  private notifyListeners(message: SyncMessage) {
+    const listeners = this.listeners.get(message.type);
     if (listeners) {
       listeners.forEach((callback) => {
         try {
-          callback();
+          callback(message);
         } catch (error) {
           console.error('Error in sync listener:', error);
         }
@@ -142,7 +144,7 @@ export const realtimeSync = new RealtimeSyncService();
 // Hook for React components
 import { useEffect } from 'react';
 
-export function useRealtimeSync(eventType: SyncEventType, callback: () => void) {
+export function useRealtimeSync(eventType: SyncEventType, callback: (message: SyncMessage) => void) {
   useEffect(() => {
     const unsubscribe = realtimeSync.subscribe(eventType, callback);
     return unsubscribe;

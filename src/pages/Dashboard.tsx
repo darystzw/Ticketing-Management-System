@@ -4,7 +4,8 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/integrations/supabase/client';
-import { realtimeSync } from '@/lib/syncService';
+import { useToast } from '@/hooks/use-toast';
+import { realtimeSync, SyncMessage } from '@/lib/syncService';
 import { ArrowLeft } from 'lucide-react';
 import { getCache, setCache } from '@/lib/cache';
 import { optimizedSelect } from '@/lib/supabaseOptimized';
@@ -22,6 +23,7 @@ import cashierIcon from '@/assets/icons/cashier.png';
 
 const Dashboard = () => {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const { user, profile, signOut, isLoading } = useAuth();
   const [stats, setStats] = useState({
     totalTickets: 0,
@@ -129,6 +131,16 @@ const Dashboard = () => {
     }
   }, []);
 
+  const handleTicketScanned = useCallback((message: SyncMessage) => {
+    // Show notification for ticket scans
+    toast({
+      title: 'Ticket Scanned',
+      description: `Ticket ${message.data.ticketCode || message.data.ticketNumber} was scanned`,
+    });
+    // Refresh stats to show updated counts
+    loadStats();
+  }, [toast, loadStats]);
+
   useEffect(() => {
     if (!user) return;
 
@@ -136,16 +148,18 @@ const Dashboard = () => {
 
     const throttledRefresh = throttle(() => loadStats(), 2000);
 
-    const unsubscribeTickets = realtimeSync.subscribe('tickets_updated', throttledRefresh);
-    const unsubscribeSales = realtimeSync.subscribe('sales_updated', throttledRefresh);
-    const unsubscribeProfiles = realtimeSync.subscribe('profiles_updated', throttledRefresh);
+    const unsubscribeTickets = realtimeSync.subscribe('tickets_updated', (message) => throttledRefresh());
+    const unsubscribeSales = realtimeSync.subscribe('sales_updated', (message) => throttledRefresh());
+    const unsubscribeProfiles = realtimeSync.subscribe('profiles_updated', (message) => throttledRefresh());
+    const unsubscribeScans = realtimeSync.subscribe('ticket_scanned', handleTicketScanned);
 
     return () => {
       unsubscribeTickets();
       unsubscribeSales();
       unsubscribeProfiles();
+      unsubscribeScans();
     };
-  }, [user, loadStats]);
+  }, [user, loadStats, handleTicketScanned]);
 
   const handleLogout = () => {
     (async () => {

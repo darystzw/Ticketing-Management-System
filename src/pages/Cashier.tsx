@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback } from 'react';
-import { realtimeSync } from '@/lib/syncService';
+import { realtimeSync, SyncMessage } from '@/lib/syncService';
 import { useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -19,6 +19,7 @@ import logoutIcon from '@/assets/icons/logout.png';
 import cashierIcon from '@/assets/icons/cashier.png';
 import moneyIcon from '@/assets/icons/money.png';
 import ticketIcon from '@/assets/icons/ticket.png';
+import scannerIcon from '@/assets/icons/scanner.png';
 
 const Cashier = () => {
   const navigate = useNavigate();
@@ -32,7 +33,9 @@ const Cashier = () => {
   const [paymentMode, setPaymentMode] = useState<'cash' | 'card' | 'mobile'>('cash');
   const [isProcessing, setIsProcessing] = useState(false);
   const [recentSales, setRecentSales] = useState<any[]>([]);
+  const [crossTabScans, setCrossTabScans] = useState<any[]>([]);
   const [salesCount, setSalesCount] = useState(0);
+  const [lastTicketsUpdateAt, setLastTicketsUpdateAt] = useState<number | null>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [selectedEventId, setSelectedEventId] = useLocalStorage<string>('cashier:selectedEventId', '');
 
@@ -133,6 +136,26 @@ const Cashier = () => {
     }
   }, [user, selectedEventId]);
 
+  const handleTicketScanned = useCallback((message: SyncMessage) => {
+    // Show cross-tab scans in the recent sales list
+    setCrossTabScans(prev => [{
+      ...message.data,
+      scannedBy: message.userId,
+      timestamp: message.timestamp,
+      isCrossTab: true,
+      // Mock sale data for display
+      amount: '0.00',
+      payment_mode: 'scanned',
+      sale_timestamp: message.data.scannedAt
+    }, ...prev.slice(0, 9)]); // Keep last 10
+
+    // Show toast notification
+    toast({
+      title: 'Ticket Scanned',
+      description: `Ticket ${message.data.ticketCode || message.data.ticketNumber} was scanned`,
+    });
+  }, [toast]);
+
   useEffect(() => {
     if (!user) return;
 
@@ -141,9 +164,25 @@ const Cashier = () => {
 
     const throttledRefresh = throttle(() => loadRecentSales(), 1500);
 
-    const unsubscribe = realtimeSync.subscribe('sales_updated', throttledRefresh);
-    return () => unsubscribe();
-  }, [user, loadRecentSales, loadEvents]);
+    const unsubSales = realtimeSync.subscribe('sales_updated', (message) => throttledRefresh());
+    const unsubTickets = realtimeSync.subscribe('tickets_updated', (message) => throttledRefresh());
+    const unsubTicketsIndicator = realtimeSync.subscribe('tickets_updated', (message) => setLastTicketsUpdateAt(Date.now()));
+    const unsubScans = realtimeSync.subscribe('ticket_scanned', handleTicketScanned);
+
+    return () => {
+      try { unsubSales(); } catch (e) { console.debug('unsubscribe sales failed', e); }
+      try { unsubTickets(); } catch (e) { console.debug('unsubscribe tickets failed', e); }
+      try { unsubTicketsIndicator(); } catch (e) { console.debug('unsubscribe tickets indicator failed', e); }
+      try { unsubScans(); } catch (e) { console.debug('unsubscribe scans failed', e); }
+    };
+  }, [user, loadRecentSales, loadEvents, handleTicketScanned]);
+
+  // Clear the transient update indicator after a short delay
+  useEffect(() => {
+    if (!lastTicketsUpdateAt) return;
+    const t = setTimeout(() => setLastTicketsUpdateAt(null), 5000);
+    return () => clearTimeout(t);
+  }, [lastTicketsUpdateAt]);
 
   const getAvailableRange = (event: any) => {
     // If event range not set yet (awaiting CSV)
@@ -421,6 +460,11 @@ const Cashier = () => {
                 <img src={moneyIcon} alt="Sales" className="w-4 h-4" />
                 <span className="text-muted-foreground">Sales: </span>
                 <span className="font-semibold">{salesCount}</span>
+                {lastTicketsUpdateAt && (
+                  <span className="ml-2 px-2 py-0.5 text-xs bg-emerald-100 text-emerald-800 rounded">
+                    Updated
+                  </span>
+                )}
               </div>
               <Button variant="outline" size="sm" onClick={() => navigate('/dashboard')}>
                 <ArrowLeft className="w-4 h-4 mr-2" />
@@ -627,14 +671,41 @@ const Cashier = () => {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {recentSales.length === 0 ? (
+              {recentSales.length === 0 && crossTabScans.length === 0 ? (
                 <div className="text-center py-16 text-muted-foreground">
                   <img src={ticketIcon} alt="Tickets" className="w-16 h-16 mx-auto mb-4 opacity-30" />
-                  <p className="text-lg font-medium mb-1">No sales yet</p>
-                  <p className="text-sm">Your sales will appear here</p>
+                  <p className="text-lg font-medium mb-1">No activity yet</p>
+                  <p className="text-sm">Your sales and cross-tab scans will appear here</p>
                 </div>
               ) : (
                 <div className="space-y-3 max-h-[500px] overflow-y-auto">
+                  {/* Cross-tab scans first */}
+                  {crossTabScans.map((scan: any) => (
+                    <div key={`cross-${scan.ticketId}-${scan.timestamp}`} className="flex items-center justify-between p-4 bg-blue-50/50 hover:bg-blue-50 rounded-xl transition-colors border border-blue-200">
+                      <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
+                          <img src={scannerIcon} alt="Scan" className="w-6 h-6" />
+                        </div>
+                        <div>
+                          <p className="font-semibold">
+                            {scan.ticketCode || `#${scan.ticketNumber}`}
+                          </p>
+                          <p className="text-sm text-muted-foreground">{scan.buyerName || 'Unknown'}</p>
+                          <p className="text-xs text-blue-600 font-medium">Cross-tab scan</p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-lg font-bold text-blue-600">
+                          Scanned
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(scan.scannedAt).toLocaleTimeString()}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+
+                  {/* Local sales */}
                   {recentSales.map((sale: any) => (
                     <div key={sale.id} className="flex items-center justify-between p-4 bg-muted/50 hover:bg-muted rounded-xl transition-colors">
                       <div className="flex items-center gap-3">

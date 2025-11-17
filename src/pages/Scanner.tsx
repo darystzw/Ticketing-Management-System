@@ -17,7 +17,7 @@ import { ArrowLeft, CheckCircle, XCircle, AlertTriangle, Scan } from 'lucide-rea
 import logoutIcon from '@/assets/icons/logout.png';
 import scannerIcon from '@/assets/icons/scanner.png';
 import ticketIcon from '@/assets/icons/ticket.png';
-import { realtimeSync } from '@/lib/syncService';
+import { realtimeSync, SyncMessage } from '@/lib/syncService';
 
 const Scanner = () => {
   const navigate = useNavigate();
@@ -27,7 +27,9 @@ const Scanner = () => {
   const [qrCode, setQrCode] = useState('');
   const [isScanning, setIsScanning] = useState(false);
   const [recentScans, setRecentScans] = useState<any[]>([]);
+  const [crossTabScans, setCrossTabScans] = useState<any[]>([]);
   const [scanCount, setScanCount] = useState(0);
+  const [lastTicketsUpdateAt, setLastTicketsUpdateAt] = useState<number | null>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [selectedEventId, setSelectedEventId] = useLocalStorage<string>('scanner:selectedEventId', '');
   const [lastScanResult, setLastScanResult] = useState<{
@@ -71,22 +73,42 @@ const Scanner = () => {
     if (!user) return;
 
     try {
-      const data = await optimizedSelect('tickets', {
-        select: `
-          id,
-          ticket_number,
-          ticket_code,
-          status,
-          buyer_name,
-          scanned_at,
-          scanned_by
-        `,
-        filters: { scanned_by: user.id },
-        deduplicate: true,
-      });
+      let data: any[] | null = null;
 
-      const scanned = data?.filter(t => t.status === 'used') || [];
-      
+      // If an event is selected, load used tickets for that event so admin scans show up
+      if (selectedEventId) {
+        const { data: eventScans, error } = await supabase
+          .from('tickets')
+          .select(`id, ticket_number, ticket_code, status, buyer_name, scanned_at, scanned_by`)
+          .eq('event_id', selectedEventId)
+          .eq('status', 'used')
+          .order('scanned_at', { ascending: false })
+          .limit(50);
+
+        if (error) {
+          console.error('Error loading event scans:', error);
+        } else {
+          data = eventScans as any[] | null;
+        }
+      } else {
+        // Fallback: load only current scanner's scans
+        data = await optimizedSelect('tickets', {
+          select: `
+            id,
+            ticket_number,
+            ticket_code,
+            status,
+            buyer_name,
+            scanned_at,
+            scanned_by
+          `,
+          filters: { scanned_by: user.id },
+          deduplicate: true,
+        });
+      }
+
+      const scanned = data || [];
+
       setRecentScans(
         scanned
           .sort((a, b) => new Date(b.scanned_at).getTime() - new Date(a.scanned_at).getTime())
@@ -96,7 +118,25 @@ const Scanner = () => {
     } catch (error) {
       console.error('Error loading recent scans:', error);
     }
-  }, [user]);
+  }, [user, selectedEventId]);
+
+  const handleTicketScanned = useCallback((message: SyncMessage) => {
+    // Only show scans from other users/tabs
+    if (message.userId !== user?.id) {
+      setCrossTabScans(prev => [{
+        ...message.data,
+        scannedBy: message.userId,
+        timestamp: message.timestamp,
+        isCrossTab: true
+      }, ...prev.slice(0, 9)]); // Keep last 10
+
+      // Show toast notification for cross-tab scan
+      toast({
+        title: 'Cross-Tab Scan',
+        description: `Ticket ${message.data.ticketCode || message.data.ticketNumber} scanned in another tab`,
+      });
+    }
+  }, [toast, user?.id]);
 
   useEffect(() => {
     if (!user) return;
@@ -106,9 +146,23 @@ const Scanner = () => {
 
     const throttledRefresh = throttle(() => loadRecentScans(), 1500);
 
-    const unsubscribe = realtimeSync.subscribe('tickets_updated', throttledRefresh);
-    return () => unsubscribe();
-  }, [user, loadRecentScans, loadEvents]);
+    const unsubscribe = realtimeSync.subscribe('tickets_updated', (message) => throttledRefresh());
+    const unsubscribeIndicator = realtimeSync.subscribe('tickets_updated', (message) => setLastTicketsUpdateAt(Date.now()));
+    const unsubscribeScans = realtimeSync.subscribe('ticket_scanned', handleTicketScanned);
+
+    return () => {
+      try { unsubscribe(); } catch (e) { console.debug('unsubscribe tickets failed', e); }
+      try { unsubscribeIndicator(); } catch (e) { console.debug('unsubscribe indicator failed', e); }
+      try { unsubscribeScans(); } catch (e) { console.debug('unsubscribe scans failed', e); }
+    };
+  }, [user, loadRecentScans, loadEvents, handleTicketScanned]);
+
+  // Clear the transient update indicator after a short delay
+  useEffect(() => {
+    if (!lastTicketsUpdateAt) return;
+    const t = setTimeout(() => setLastTicketsUpdateAt(null), 5000);
+    return () => clearTimeout(t);
+  }, [lastTicketsUpdateAt]);
 
   const handleScan = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -264,6 +318,15 @@ const Scanner = () => {
           ticket: { ...ticket, status: 'used' },
         });
 
+        // Broadcast the scan event with richer payload
+        realtimeSync.broadcast('ticket_scanned', user?.id, {
+          ticketId: ticket.id,
+          ticketNumber: ticket.ticket_number,
+          ticketCode: ticket.ticket_code,
+          buyerName: ticket.buyer_name,
+          scannedAt: new Date().toISOString(),
+        });
+
         toast({
           title: 'Scan Successful',
           description: `Ticket ${ticket.ticket_code || ticket.ticket_number} - ${ticket.buyer_name || 'Unknown buyer'}`,
@@ -328,6 +391,11 @@ const Scanner = () => {
                 <img src={scannerIcon} alt="Scans" className="w-4 h-4" />
                 <span className="text-muted-foreground">Scans: </span>
                 <span className="font-semibold">{scanCount}</span>
+                {lastTicketsUpdateAt && (
+                  <span className="ml-2 px-2 py-0.5 text-xs bg-emerald-100 text-emerald-800 rounded">
+                    Updated
+                  </span>
+                )}
               </div>
               <Button variant="outline" size="sm" onClick={() => navigate('/dashboard')}>
                 <ArrowLeft className="w-4 h-4 mr-2" />
@@ -495,14 +563,39 @@ const Scanner = () => {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {recentScans.length === 0 ? (
+              {recentScans.length === 0 && crossTabScans.length === 0 ? (
                 <div className="text-center py-16 text-muted-foreground">
                   <img src={ticketIcon} alt="Tickets" className="w-16 h-16 mx-auto mb-4 opacity-30" />
                   <p className="text-lg font-medium mb-1">No scans yet</p>
-                  <p className="text-sm">Your scans will appear here</p>
+                  <p className="text-sm">Your scans and cross-tab scans will appear here</p>
                 </div>
               ) : (
                 <div className="space-y-3 max-h-[500px] overflow-y-auto">
+                  {/* Cross-tab scans first */}
+                  {crossTabScans.map((scan: any) => (
+                    <div key={`cross-${scan.ticketId}-${scan.timestamp}`} className="flex items-center justify-between p-4 bg-blue-50/50 hover:bg-blue-50 rounded-xl transition-colors border border-blue-200">
+                      <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
+                          <Scan className="w-6 h-6 text-blue-600" />
+                        </div>
+                        <div>
+                          <p className="font-semibold">
+                            {scan.ticketCode || `#${scan.ticketNumber}`}
+                          </p>
+                          <p className="text-sm text-muted-foreground">{scan.buyerName || 'Unknown'}</p>
+                          <p className="text-xs text-blue-600 font-medium">Cross-tab scan</p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-medium text-blue-600">Used</p>
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(scan.scannedAt).toLocaleTimeString()}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+
+                  {/* Local scans */}
                   {recentScans.map((ticket: any) => (
                     <div key={ticket.id} className="flex items-center justify-between p-4 bg-muted/50 hover:bg-muted rounded-xl transition-colors">
                       <div className="flex items-center gap-3">
