@@ -1,8 +1,21 @@
 {
-  "name": "vite_react_shadcn_ts",
+  "name": "ticket_management_system",
+  "version": "1.0.0",
   "private": true,
-  "version": "0.0.0",
+  "description": "A comprehensive event ticket management system with support for bulk ticket sales and individual cashier sales. The system provides three distinct interfaces for managing ticket lifecycle: Admin, Cashier, and Scanner roles.",
+  "keywords": [],
+  "homepage": "https://github.com/darystzw/Ticketing-Management-System#readme",
+  "bugs": {
+    "url": "https://github.com/darystzw/Ticketing-Management-System/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darystzw/Ticketing-Management-System.git"
+  },
+  "license": "ISC",
+  "author": "Norest Dhliwayo",
   "type": "module",
+  "main": "eslint.config.js",
   "scripts": {
     "dev": "vite",
     "dev:all": "npm-run-all --parallel dev ws",

@@ -434,6 +434,39 @@ const Cashier = () => {
     }
   };
 
+  const [hoveredPaymentMode, setHoveredPaymentMode] = useState<'cash' | 'card' | 'mobile' | null>(null);
+
+  const paymentButtonClass = (mode: 'cash' | 'card' | 'mobile') => {
+    const base = 'relative flex flex-col items-center justify-center p-4 rounded-lg border-2 transition-colors transition-shadow transition-transform duration-150';
+    const disabledClass = !availableRange ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer';
+
+    const selectedStyles: Record<string, string> = {
+      cash: 'border-success bg-success/10 text-success',
+      card: 'border-blue-600 bg-blue-50 text-blue-600',
+      mobile: 'border-purple-600 bg-purple-50 text-purple-600',
+    };
+
+    const unselectedStyles: Record<string, string> = {
+      cash: 'border-border bg-transparent text-foreground',
+      card: 'border-border bg-transparent text-foreground',
+      mobile: 'border-border bg-transparent text-foreground',
+    };
+
+    // Active indicator: hovered mode takes precedence, then selected paymentMode, then default to 'cash'
+    const activeMode = hoveredPaymentMode || paymentMode || 'cash';
+
+    // Apply the same visual "card selected" effect: subtle lift, shadow, and mode-specific ring when active
+    const modeRings: Record<string, string> = {
+      cash: 'ring-success/30',
+      card: 'ring-blue-200',
+      mobile: 'ring-purple-200',
+    };
+
+    const selectedEffect = activeMode === mode ? `shadow-lg -translate-y-1 ring-2 ring-offset-2 ${modeRings[mode]}` : '';
+
+    return `${base} ${activeMode === mode ? selectedStyles[mode] : unselectedStyles[mode]} ${selectedEffect} ${disabledClass}`;
+  };
+
   if (!user) return null;
 
   const selectedEvent = events.find(e => e.id === selectedEventId);
@@ -611,39 +644,38 @@ const Cashier = () => {
                       type="button"
                       onClick={() => setPaymentMode('cash')}
                       disabled={!availableRange}
-                      className={`flex flex-col items-center justify-center p-4 rounded-lg border-2 transition-all ${
-                        paymentMode === 'cash'
-                          ? 'border-success bg-success/10 text-success'
-                          : 'border-border hover:border-success/50'
-                      } ${!availableRange ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                      onMouseEnter={() => availableRange && setHoveredPaymentMode('cash')}
+                      onMouseLeave={() => setHoveredPaymentMode(null)}
+                      className={paymentButtonClass('cash')}
                     >
                       <Banknote className="w-6 h-6 mb-2" />
                       <span className="text-sm font-medium">Cash</span>
+                      {paymentMode === 'cash' && (
+                        <span className="absolute top-2 right-2 text-[10px] px-2 py-0.5 bg-primary/10 text-primary rounded-full">
+                          Default
+                        </span>
+                      )}
                     </button>
-                    
+
                     <button
                       type="button"
                       onClick={() => setPaymentMode('card')}
                       disabled={!availableRange}
-                      className={`flex flex-col items-center justify-center p-4 rounded-lg border-2 transition-all ${
-                        paymentMode === 'card'
-                          ? 'border-blue-600 bg-blue-50 text-blue-600'
-                          : 'border-border hover:border-blue-600/50'
-                      } ${!availableRange ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                      onMouseEnter={() => availableRange && setHoveredPaymentMode('card')}
+                      onMouseLeave={() => setHoveredPaymentMode(null)}
+                      className={paymentButtonClass('card')}
                     >
                       <CreditCard className="w-6 h-6 mb-2" />
                       <span className="text-sm font-medium">Card</span>
                     </button>
-                    
+
                     <button
                       type="button"
                       onClick={() => setPaymentMode('mobile')}
                       disabled={!availableRange}
-                      className={`flex flex-col items-center justify-center p-4 rounded-lg border-2 transition-all ${
-                        paymentMode === 'mobile'
-                          ? 'border-purple-600 bg-purple-50 text-purple-600'
-                          : 'border-border hover:border-purple-600/50'
-                      } ${!availableRange ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                      onMouseEnter={() => availableRange && setHoveredPaymentMode('mobile')}
+                      onMouseLeave={() => setHoveredPaymentMode(null)}
+                      className={paymentButtonClass('mobile')}
                     >
                       <Smartphone className="w-6 h-6 mb-2" />
                       <span className="text-sm font-medium">Mobile</span>

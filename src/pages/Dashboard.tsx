@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Card, CardContent } from '@/components/ui/card';
@@ -9,6 +10,8 @@ import { realtimeSync, SyncMessage } from '@/lib/syncService';
 import { ArrowLeft } from 'lucide-react';
 import { getCache, setCache } from '@/lib/cache';
 import { optimizedSelect } from '@/lib/supabaseOptimized';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import useLocalStorage from '@/hooks/use-local-storage';
 import { throttle } from '@/lib/networkOptimizer';
 import { perfLogger, measureAsync } from '@/lib/performanceLogger';
 import dashboardIcon from '@/assets/icons/dashboard.png';
@@ -36,6 +39,8 @@ const Dashboard = () => {
     totalUsers: 0,
   });
   const [isLoadingStats, setIsLoadingStats] = useState(true);
+  const [events, setEvents] = useState<any[]>([]);
+  const [selectedEventId, setSelectedEventId] = useLocalStorage<string>('dashboard:selectedEventId', '');
 
   const loadStats = useCallback(async () => {
     try {
@@ -53,19 +58,36 @@ const Dashboard = () => {
       }
 
       // Fetch tickets and sales data
-      const ticketsData = await measureAsync('dashboard-fetch-tickets', () =>
-        optimizedSelect('tickets', {
-          select: 'status, sale_type',
-          deduplicate: true,
-        })
-      );
+      let ticketsData: any[] | null = null;
+      let salesData: any[] | null = null;
 
-      const salesData = await measureAsync('dashboard-fetch-sales', () =>
-        optimizedSelect('sales', {
-          select: 'amount',
-          deduplicate: true,
-        })
-      );
+      if (selectedEventId) {
+        // Load event-scoped tickets and sales
+        ticketsData = await measureAsync('dashboard-fetch-tickets-event', async () =>
+          (await supabase.from('tickets').select('status, sale_type').eq('event_id', selectedEventId)).data
+        );
+
+        salesData = await measureAsync('dashboard-fetch-sales-event', async () =>
+          (await supabase
+            .from('sales')
+            .select('amount, tickets (event_id)')
+            .eq('tickets.event_id', selectedEventId)).data
+        );
+      } else {
+        ticketsData = await measureAsync('dashboard-fetch-tickets', () =>
+          optimizedSelect('tickets', {
+            select: 'status, sale_type',
+            deduplicate: true,
+          })
+        );
+
+        salesData = await measureAsync('dashboard-fetch-sales', () =>
+          optimizedSelect('sales', {
+            select: 'amount',
+            deduplicate: true,
+          })
+        );
+      }
 
       const userCountResult = await measureAsync('dashboard-fetch-userCount', async () =>
         await supabase.from('profiles').select('id', { count: 'exact', head: true })
@@ -89,10 +111,31 @@ const Dashboard = () => {
       const usedCount = tickets.filter((t) => t.status === 'used').length;
       
       // Bulk sold: status='sold' AND sale_type='bulk'
-      const bulkSoldCount = tickets.filter(
+      let bulkSoldCount = tickets.filter(
         (t) => t.status === 'sold' && t.sale_type === 'bulk'
       ).length;
-      
+
+      // If viewing a specific event and that event defines `bulk_sold_range_end`,
+      // use that value as the bulk sold number (as requested) instead of counting rows.
+      if (selectedEventId) {
+        try {
+          const { data: ev } = await supabase
+            .from('events')
+            .select('bulk_sold_range_end')
+            .eq('id', selectedEventId)
+            .maybeSingle();
+
+          if (ev && ev.bulk_sold_range_end != null) {
+            const parsed = Number(ev.bulk_sold_range_end);
+            if (!Number.isNaN(parsed)) {
+              bulkSoldCount = parsed;
+            }
+          }
+        } catch (err) {
+          console.debug('Failed to read event bulk range for dashboard:', err);
+        }
+      }
+
       // Cashier sold: status='sold' AND sale_type='cashier'
       const cashierSoldCount = tickets.filter(
         (t) => t.status === 'sold' && t.sale_type === 'cashier'
@@ -129,7 +172,31 @@ const Dashboard = () => {
     } finally {
       setIsLoadingStats(false);
     }
-  }, []);
+  }, [selectedEventId]);
+
+  const loadEvents = useCallback(async () => {
+    const cached = getCache<any[]>('events_all');
+    if (cached && cached.length > 0) {
+      setEvents(cached);
+      if (!selectedEventId) setSelectedEventId(cached[0].id);
+    }
+
+    const { data, error } = await supabase
+      .from('events')
+      .select('*')
+      .order('event_date', { ascending: false });
+
+    if (error) {
+      console.error('Error loading events:', error);
+      return;
+    }
+
+    if (data && data.length > 0) {
+      setEvents(data);
+      try { setCache('events_all', data, 1000 * 60 * 5); } catch (e) { /* ignore */ }
+      if (!selectedEventId) setSelectedEventId(data[0].id);
+    }
+  }, [selectedEventId, setSelectedEventId]);
 
   const handleTicketScanned = useCallback((message: SyncMessage) => {
     // Show notification for ticket scans
@@ -141,9 +208,15 @@ const Dashboard = () => {
     loadStats();
   }, [toast, loadStats]);
 
+  // Select mapping: Select component requires non-empty values, so use '__all__' as the UI value
+  // and map it to '' for our stored `selectedEventId` which represents 'All Events'.
+  const dashboardSelectValue = selectedEventId || '__all__';
+  const handleEventSelect = (val: string) => setSelectedEventId(val === '__all__' ? '' : val);
+
   useEffect(() => {
     if (!user) return;
 
+    loadEvents();
     loadStats();
 
     const throttledRefresh = throttle(() => loadStats(), 2000);
@@ -159,7 +232,7 @@ const Dashboard = () => {
       unsubscribeProfiles();
       unsubscribeScans();
     };
-  }, [user, loadStats, handleTicketScanned]);
+  }, [user, loadStats, handleTicketScanned, loadEvents]);
 
   const handleLogout = () => {
     (async () => {
@@ -195,6 +268,21 @@ const Dashboard = () => {
             <div className="flex items-center gap-4">
               {isLoadingStats && (
                 <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+              )}
+              {events.length > 0 && (
+                <div className="hidden sm:flex items-center">
+                  <Select value={dashboardSelectValue} onValueChange={handleEventSelect}>
+                    <SelectTrigger className="w-44">
+                      <SelectValue placeholder="All events" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">All Events</SelectItem>
+                      {events.map((ev: any) => (
+                        <SelectItem key={ev.id} value={ev.id}>{ev.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               )}
               <span className="text-sm text-muted-foreground hidden sm:inline">
                 {profile?.name || user.email?.split('@')[0] || 'User'}
@@ -244,7 +332,7 @@ const Dashboard = () => {
                 <img src={scannerIcon} alt="Scanner" className="w-7 h-7" />
               </div>
               <div>
-                <p className="text-sm font-medium text-muted-foreground mb-1">Used Tickets</p>
+                <p className="text-sm font-medium text-muted-foreground mb-1">Scanned Tickets</p>
                 <p className="text-3xl font-bold text-foreground">{stats.usedTickets.toLocaleString()}</p>
               </div>
             </CardContent>
